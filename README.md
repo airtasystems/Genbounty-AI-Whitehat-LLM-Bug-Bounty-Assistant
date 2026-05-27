@@ -1,5 +1,7 @@
 # Genbounty - AI Whitehat LLM Bug Bounty Assistant
 
+![Genbounty - AI Whitehat Bug Bounty Assistant](web/IMG/Genbounty%20-%20AI%20Whitehat%20Bug%20Bounty.png)
+
 **Genbounty LLM Whitehat Assistant** is an open-source toolkit for **AI bug bounty hunting**, **LLM security testing**, and **authorized whitehat assessments** of chatbots, AI agents, and LLM-backed APIs. It helps researchers and bounty hunters move from manual prompt trials to a repeatable pipeline: **generate adversarial tests**, **execute them at scale**, **triage severity**, and **export structured findings** to the [Genbounty](https://genbounty.com) platform.
 
 Use it to hunt **prompt injection**, **jailbreaks**, **system prompt exfiltration**, **sensitive data disclosure**, **indirect injection via file uploads** (PDF, CSV, images, audio), and **agentic/tool abuse**—mapped to playbooks such as **OWASP LLM Top 10**, **OWASP Agentic**, and **MITRE ATLAS**. Tests run through **browser automation** (Playwright) or direct **HTTP API** submission, so you can assess real production UIs and backend chat endpoints the same way a user would.
