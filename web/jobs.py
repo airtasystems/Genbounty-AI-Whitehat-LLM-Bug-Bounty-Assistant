@@ -605,9 +605,22 @@ async def _start_generate(job: Job):
         _materialize_multimodal_output(job, strategy, playbook)
 
 
+def _coerce_login_url(value: object) -> str:
+    """Normalize login URL from job params (UI may send a string or nested object)."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("url", "login_url", "start_url"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        return ""
+    return str(value).strip() if value else ""
+
+
 async def _start_login(job: Job):
     worker = _root / "web" / "login_worker.py"
-    url = job.params.get("url", "")
+    url = _coerce_login_url(job.params.get("url", ""))
     if not url:
         job.output.append("[!] No URL provided for login")
         job.status = "failed"
@@ -729,6 +742,8 @@ async def _start_run_tests(job: Job):
                     break
                 if rc != 0:
                     failed = True
+                elif assess:
+                    _maybe_export_latest_assessed_report(job)
             if not _is_cancelled(job):
                 if failed:
                     _set_final_status(job, "failed")
@@ -752,7 +767,9 @@ async def _start_run_tests(job: Job):
         return
 
     _preflight_suite(suite_path)
-    await _run_subprocess_job(job, _build_run_cmd(suite_path), env=env)
+    rc = await _run_subprocess_job(job, _build_run_cmd(suite_path), env=env)
+    if rc == 0 and assess:
+        _maybe_export_latest_assessed_report(job)
 
 
 async def _start_sample_request(job: Job):
@@ -874,6 +891,153 @@ async def _start_sample_request(job: Job):
     await _run_thread_job(job, _do)
 
 
+def _component_export_config(job: Job) -> dict:
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from pipeline.export_settings import export_config_for_job
+
+    return export_config_for_job(job.site, job.component, job.params)
+
+
+def _export_credentials(job: Job) -> tuple[str, str, str] | None:
+    """Resolve Genbounty host, api_key, user_id for export. Returns None if incomplete."""
+    env = _load_env_vars()
+    host = env.get("GENBOUNTY_HOST", "").strip()
+    api_key = env.get("GENBOUNTY_API_KEY", "").strip()
+    export_cfg = _component_export_config(job)
+    user_id = (
+        job.params.get("user_id")
+        or export_cfg.get("user_id")
+        or env.get("GENBOUNTY_USER_ID")
+        or ""
+    ).strip()
+    if not host or not api_key or not user_id:
+        missing = [
+            name
+            for name, val in (
+                ("GENBOUNTY_HOST", host),
+                ("GENBOUNTY_API_KEY", api_key),
+                ("user_id", user_id),
+            )
+            if not val
+        ]
+        print(f"[!] Export skipped - missing: {', '.join(missing)}")
+        return None
+    return host, api_key, user_id
+
+
+def _export_report_paths(
+    report_paths: list[Path],
+    *,
+    host: str,
+    api_key: str,
+    user_id: str,
+    default_level: str | None = None,
+    risk_levels: list | None = None,
+) -> None:
+    """POST pipeline reports to Genbounty using export_security batching."""
+    import json as _json
+
+    if not report_paths:
+        print("[-] No pipeline reports to export.")
+        return
+
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from pipeline.export_airta import export_pipeline_report
+    from pipeline.export_security import export_batch_delay_seconds
+
+    report_delay = export_batch_delay_seconds()
+    total = len(report_paths)
+    if total > 1:
+        print(
+            f"[airta_progress] {_json.dumps({'type': 'batch_start', 'phase': 'export', 'total': total}, ensure_ascii=False)}",
+            flush=True,
+        )
+
+    for i, rp in enumerate(report_paths, 1):
+        if total > 1:
+            print(
+                f"[airta_progress] {_json.dumps({'type': 'batch_progress', 'phase': 'export', 'current': i, 'total': total, 'log': rp.name}, ensure_ascii=False)}",
+                flush=True,
+            )
+        try:
+            export_pipeline_report(
+                rp,
+                host=host,
+                api_key=api_key,
+                user_id=user_id,
+                default_level=default_level,
+                risk_levels=risk_levels,
+            )
+        except Exception as exc:
+            print(f"[!] Export failed for {rp}: {exc}", flush=True)
+
+        if i < total and report_delay > 0:
+            print(f"[*] Waiting {report_delay:.1f}s before next report export...", flush=True)
+            time.sleep(report_delay)
+
+    if total > 1:
+        print(
+            f"[airta_progress] {_json.dumps({'type': 'batch_done', 'phase': 'export', 'total': total}, ensure_ascii=False)}",
+            flush=True,
+        )
+
+
+def _unexported_reports(job: Job, report_paths: list[Path]) -> list[Path]:
+    done = set(job.params.get("_exported_report_paths") or [])
+    fresh = [p for p in report_paths if str(p) not in done]
+    if fresh:
+        job.params.setdefault("_exported_report_paths", []).extend(str(p) for p in fresh)
+    return fresh
+
+
+def _auto_export_after_assess(job: Job, report_paths: list[Path]) -> None:
+    """Export pipeline reports when component export.auto_after_assess is enabled."""
+    if not (job.site and job.component):
+        return
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from pipeline.export_settings import should_auto_export
+
+    if not should_auto_export(job.site, job.component, job.params):
+        return
+
+    paths = _unexported_reports(job, report_paths)
+    if not paths:
+        return
+
+    creds = _export_credentials(job)
+    if not creds:
+        return
+    host, api_key, user_id = creds
+    export_cfg = _component_export_config(job)
+    risk_levels = job.params.get("risk_levels") or export_cfg.get("risk_levels")
+    print(f"[*] Auto-export: submitting {len(paths)} pipeline report(s)...")
+    _export_report_paths(
+        paths,
+        host=host,
+        api_key=api_key,
+        user_id=user_id,
+        default_level=job.params.get("default_level"),
+        risk_levels=risk_levels,
+    )
+
+
+def _maybe_export_latest_assessed_report(job: Job) -> None:
+    """After run_tests --assess, export the newest pipeline report if auto-export is on."""
+    if not job.params.get("assess"):
+        return
+    reports = _list_pipeline_report_paths(job.site, job.component)
+    if not reports:
+        return
+    newest = reports[0]
+    since = job.created_at.timestamp() - 2.0
+    if newest.stat().st_mtime < since:
+        return
+    _auto_export_after_assess(job, [newest])
+
+
 async def _start_security_assess(job: Job):
     def _do():
         import json as _json
@@ -898,6 +1062,7 @@ async def _start_security_assess(job: Job):
                 flush=True,
             )
 
+        exported_reports: list[Path] = []
         for i, cl_path in enumerate(log_paths, 1):
             if total > 1:
                 print(
@@ -905,7 +1070,8 @@ async def _start_security_assess(job: Job):
                     flush=True,
                 )
             try:
-                _assess_attack_log(cl_path)
+                report_path = _assess_attack_log(cl_path)
+                exported_reports.append(report_path)
             except Exception as exc:
                 print(f"[!] Assessment failed for {cl_path}: {exc}", flush=True)
 
@@ -914,6 +1080,9 @@ async def _start_security_assess(job: Job):
                 f"[airta_progress] {_json.dumps({'type': 'batch_done', 'phase': 'risk', 'total': total}, ensure_ascii=False)}",
                 flush=True,
             )
+
+        if exported_reports:
+            _auto_export_after_assess(job, exported_reports)
 
     await _run_thread_job(job, _do)
 
@@ -969,66 +1138,27 @@ def _resolve_export_reports(job: Job) -> list[Path]:
 
 
 async def _start_export(job: Job):
-    default_level = job.params.get("default_level")
-
-    # host + api_key come from .env; user_id is per-export from params
-    env = _load_env_vars()
-    host = env.get("GENBOUNTY_HOST", "")
-    api_key = env.get("GENBOUNTY_API_KEY", "")
-    user_id = job.params.get("user_id", "")
-
-    missing = [k for k, v in [("GENBOUNTY_HOST", host), ("GENBOUNTY_API_KEY", api_key), ("user_id", user_id)] if not v]
-    if missing:
-        job.output.append(f"[!] Missing credentials in .env: {', '.join(missing)}")
+    creds = _export_credentials(job)
+    if not creds:
+        job.output.append("[!] Missing Genbounty credentials or user_id for export")
         job.status = "failed"
         return
 
+    host, api_key, user_id = creds
+
     def _do():
-        import json as _json
-
-        if str(_root) not in sys.path:
-            sys.path.insert(0, str(_root))
-        from pipeline.export_airta import export_pipeline_report
-        from pipeline.export_security import export_batch_delay_seconds
-
+        export_cfg = _component_export_config(job)
         report_paths = _resolve_export_reports(job)
         if not report_paths:
             return
-
-        report_delay = export_batch_delay_seconds()
-        total = len(report_paths)
-        if total > 1:
-            print(
-                f"[airta_progress] {_json.dumps({'type': 'batch_start', 'phase': 'export', 'total': total}, ensure_ascii=False)}",
-                flush=True,
-            )
-
-        for i, rp in enumerate(report_paths, 1):
-            if total > 1:
-                print(
-                    f"[airta_progress] {_json.dumps({'type': 'batch_progress', 'phase': 'export', 'current': i, 'total': total, 'log': rp.name}, ensure_ascii=False)}",
-                    flush=True,
-                )
-            try:
-                export_pipeline_report(
-                    rp,
-                    host=host,
-                    api_key=api_key,
-                    user_id=user_id,
-                    default_level=default_level,
-                )
-            except Exception as exc:
-                print(f"[!] Export failed for {rp}: {exc}", flush=True)
-
-            if i < total and report_delay > 0:
-                print(f"[*] Waiting {report_delay:.1f}s before next report export...", flush=True)
-                time.sleep(report_delay)
-
-        if total > 1:
-            print(
-                f"[airta_progress] {_json.dumps({'type': 'batch_done', 'phase': 'export', 'total': total}, ensure_ascii=False)}",
-                flush=True,
-            )
+        _export_report_paths(
+            report_paths,
+            host=host,
+            api_key=api_key,
+            user_id=user_id,
+            default_level=job.params.get("default_level"),
+            risk_levels=job.params.get("risk_levels") or export_cfg.get("risk_levels"),
+        )
 
     await _run_thread_job(job, _do)
 

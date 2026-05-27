@@ -313,11 +313,11 @@ def _apply_ui_prompt_transform(text: str) -> str:
 FETCH_METHOD = 'pool'
 
 # --- Pool (Tier 1: Full speed) ---
-POOL_SIZE = 8
+POOL_SIZE = 2
 
 # --- Pool + cluster browser (shared by FETCH_METHOD pool and cluster) ---
 # When True, enable all flags below (human Chrome, styles, stealth, context opts).
-POOL_CLUSTER_HUMAN_LIKE = False
+POOL_CLUSTER_HUMAN_LIKE = True
 # A/B test individually (ignored when POOL_CLUSTER_HUMAN_LIKE is True):
 # 1 = stylesheets   2 = playwright-stealth   3 = HUMAN_CHROME_ARGS   4 = locale/viewport/geo UA
 POOL_CLUSTER_ALLOW_STYLES = False
@@ -338,8 +338,8 @@ def get_pool_cluster_browser_enhancements():
     )
 
 # --- Cluster (Tier 2: Max power) ---
-CONTEXT_COUNT = 8
-PAGES_PER_CONTEXT = 6
+CONTEXT_COUNT = 6
+PAGES_PER_CONTEXT = 1
 
 # --- API submission ---
 # Max concurrent HTTP requests when transport is api (1 = fully sequential).
@@ -361,7 +361,7 @@ LOCALSTORAGE_MAX_VALUE_LEN = 8192
 # New context per request, no pool. Maximizes human resemblance.
 HUMAN_COUNTRY = 'UK'
 HUMAN_VIEWPORT = None  # None = random from common resolutions
-HUMAN_ALLOW_STYLES = True
+HUMAN_ALLOW_STYLES = False
 HUMAN_READ_DELAY_MS = 600
 HUMAN_SCROLL_AFTER_LOAD = False
 # Recent Chrome UA. None = use Playwright default (stealth still patches navigator).

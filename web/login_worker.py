@@ -12,7 +12,10 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python login_worker.py <url>", file=sys.stderr)
         sys.exit(1)
-    url = sys.argv[1]
+    url = sys.argv[1].strip()
+    if not url or url.startswith("{"):
+        print("[!] Invalid login URL", file=sys.stderr)
+        sys.exit(1)
     domain = asyncio.run(capture_login(url))
     if domain:
         print(f"[+] Auth saved for {domain}")

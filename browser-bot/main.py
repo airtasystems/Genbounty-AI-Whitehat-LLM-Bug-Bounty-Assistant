@@ -314,6 +314,20 @@ async def run_posts(site: str | None = None, component: str | None = None, *, mo
     suite_path: optional Path to the suite JSON to read prompts from directly, bypassing
     the posts/ staging directory.
     """
+    if site and component:
+        from browser_bot.config import apply_component_settings
+
+        applied = apply_component_settings(site, component)
+        if applied:
+            from browser_bot.submit.common import log_resilience
+
+            method = applied.get("FETCH_METHOD", "")
+            headless = applied.get("HEADLESS", "")
+            log_resilience(
+                "settings_applied",
+                f"Component browser settings applied (FETCH_METHOD={method}, HEADLESS={headless})",
+            )
+
     # UI mode: component has submission config
     if site and component:
         sub = get_submission_config(site, component)
@@ -373,9 +387,19 @@ async def run_posts(site: str | None = None, component: str | None = None, *, mo
                 )
             else:
                 primary_domain = site
+                from browser_bot.page_blockers import submission_needs_headed_human
+
+                human_only = submission_needs_headed_human(site, component)
+                if human_only:
+                    from browser_bot.submit.common import log_resilience
+
+                    log_resilience(
+                        "cloudflare_headed",
+                        "Cloudflare-headed target — using human fetcher with visible browser only",
+                    )
                 async with async_playwright() as p:
                     pool_fetcher, cluster_fetcher, human_fetcher, pool_context, cluster_browser, cluster_contexts = await _setup_fetchers(
-                        p, primary_domain, post_count=post_count
+                        p, primary_domain, post_count=post_count, human_only=human_only
                     )
                     results, log_path = await run_submission(
                         site,

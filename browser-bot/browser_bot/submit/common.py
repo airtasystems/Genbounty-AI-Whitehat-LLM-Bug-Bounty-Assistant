@@ -15,15 +15,36 @@ from browser_bot.config import EVASION_MAX_RETRIES, EVASION_RETRY_WAIT_S
 from browser_bot.sites import ensure_component_dir, get_component_path
 
 
+def log_resilience(
+    category: str,
+    message: str,
+    *,
+    attempt: int | None = None,
+    max_attempts: int | None = None,
+    wait_sec: float | None = None,
+    detail: str = "",
+) -> None:
+    """Emit a human-readable resilience attempt line for the web UI console."""
+    parts = [message]
+    if attempt is not None and max_attempts is not None:
+        parts.append(f"(attempt {attempt}/{max_attempts})")
+    elif attempt is not None:
+        parts.append(f"(attempt {attempt})")
+    if wait_sec is not None:
+        parts.append(f"— waiting {wait_sec:.0f}s")
+    if detail:
+        parts.append(f"— {detail}")
+    line = " ".join(parts)
+    print(f"[resilience] {line}", flush=True)
+
+
 def log_evasion(reason: str, *, sleep_s: float | None = None, detail: str = "") -> None:
     """Emit a line for web UI / logs when an evasion delay or retry is applied."""
-    parts = [f"reason={reason}"]
-    if sleep_s is not None:
-        parts.append(f"sleep_s={sleep_s}")
-    tail = " | ".join(parts)
-    if detail:
-        tail = f"{tail} | {detail}"
-    print(f"[evasion] {tail}", flush=True)
+    log_resilience(
+        reason,
+        detail or reason.replace("_", " "),
+        wait_sec=sleep_s,
+    )
 
 
 def log_airta_progress(payload: dict) -> None:
@@ -154,10 +175,12 @@ def _before_sleep_evasion(retry_state: Any) -> None:
     exc = retry_state.outcome.exception()
     status = getattr(exc, "status", None) if exc else None
     attempt = retry_state.attempt_number
-    log_evasion(
-        "http_retry_after_non_2xx",
-        sleep_s=EVASION_RETRY_WAIT_S,
-        detail=f"Will retry after HTTP error (status={status}); attempt {attempt}/{EVASION_MAX_RETRIES}",
+    log_resilience(
+        "http_retry",
+        f"HTTP error (status={status}) — retrying after backoff",
+        attempt=attempt,
+        max_attempts=EVASION_MAX_RETRIES,
+        wait_sec=EVASION_RETRY_WAIT_S,
     )
 
 

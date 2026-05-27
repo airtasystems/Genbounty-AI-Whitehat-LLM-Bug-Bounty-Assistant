@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 from typing import TYPE_CHECKING, Any
 
 from browser_bot.auth_state import load_auth_config
@@ -46,8 +48,44 @@ CAPTCHA_HINTS = (
     "captcha",
     "recaptcha",
     "hcaptcha",
-    "verify you are human",
     "security check",
+)
+
+CLOUDFLARE_BODY_HINTS = (
+    "verify you are human",
+    "checking your browser",
+    "just a moment",
+    "needs to review the security",
+    "performance & security by cloudflare",
+    "ray id",
+)
+
+CLOUDFLARE_IFRAME_SELECTORS = (
+    'iframe[src*="challenges.cloudflare.com"]',
+    'iframe[src*="challenges.cloudflare"]',
+    'iframe[src*="turnstile"]',
+    'iframe[title*="Widget"]',
+    'iframe[title*="challenge"]',
+)
+
+CLOUDFLARE_WIDGET_SELECTORS = (
+    'input[type="checkbox"]',
+    '[role="checkbox"]',
+    "label",
+    ".ctp-checkbox-label",
+    "#challenge-stage",
+    ".mark",
+)
+
+DEFAULT_CLOUDFLARE_WAIT_SEC = 120.0
+DEFAULT_CLOUDFLARE_CLICK_INTERVAL_SEC = 4.0
+
+TURNSTILE_SELECTORS = (
+    "#cf-turnstile",
+    '[class*="cf-turnstile"]',
+    '[id*="turnstile"]',
+    'div:has-text("Verify you are human")',
+    'label:has-text("Verify you are human")',
 )
 
 RATE_LIMIT_BODY_PHRASES = (
@@ -225,17 +263,14 @@ async def _resolve_rate_limit(
     max_auto_retries = int(cfg["max_auto_retries"])
 
     for attempt in range(1, max_auto_retries + 1):
-        from browser_bot.submit.common import log_evasion
+        from browser_bot.submit.common import log_resilience
 
-        log_evasion(
+        log_resilience(
             "rate_limit_backoff",
-            sleep_s=backoff_sec,
-            detail=f"Rate limit visible; waiting before reload ({attempt}/{max_auto_retries})",
-        )
-        print(
-            f"[*] Rate limit detected - backing off {backoff_sec:.0f}s "
-            f"(attempt {attempt}/{max_auto_retries})…",
-            flush=True,
+            "Rate limit detected — backing off before page reload",
+            attempt=attempt,
+            max_attempts=max_auto_retries,
+            wait_sec=backoff_sec,
         )
         await asyncio.sleep(backoff_sec)
         try:
@@ -248,7 +283,9 @@ async def _resolve_rate_limit(
         except Exception:
             pass
         if not await _rate_limit_visible(page, blockers):
-            print("[+] Rate limit cleared after backoff reload.", flush=True)
+            from browser_bot.submit.common import log_resilience
+
+            log_resilience("rate_limit_cleared", "Rate limit cleared after backoff reload")
             return
 
     _emit_blocked_rate_limit(site, backoff_sec=backoff_sec)
@@ -340,6 +377,12 @@ async def _resolve_login_wall(
         return
 
     if _site_has_saved_session(site):
+        from browser_bot.submit.common import log_resilience
+
+        log_resilience(
+            "login_session_reload",
+            "Login wall detected — reloading saved session",
+        )
         try:
             await page.reload(wait_until="domcontentloaded", timeout=60000)
             try:
@@ -350,7 +393,9 @@ async def _resolve_login_wall(
         except Exception:
             pass
         if not await _login_wall_visible(page):
-            print("[+] Login wall cleared after session reload.", flush=True)
+            from browser_bot.submit.common import log_resilience
+
+            log_resilience("login_cleared", "Login wall cleared after session reload")
             return
 
     login_url = _resolve_login_url(site, component, start_url)
@@ -374,6 +419,23 @@ async def check_login_wall_before_submit(
 ) -> None:
     """Per-prompt login check for multi-turn runs."""
     await _resolve_login_wall(page, site=site, component=component, start_url=start_url)
+
+
+def submission_needs_headed_human(site: str, component: str) -> bool:
+    """True when component config marks Cloudflare/Turnstile targets (headed human browser required)."""
+    sub = load_component_config(site, component).get("submission")
+    if not isinstance(sub, dict):
+        return False
+    return bool(sub.get("cloudflare_headed"))
+
+
+def _is_headless_browser() -> bool:
+    try:
+        from browser_bot.config import HEADLESS
+
+        return bool(HEADLESS)
+    except Exception:
+        return True
 
 
 def _blocker_entries(blockers: list[dict] | None) -> list[dict]:
@@ -430,15 +492,21 @@ async def _attempt_cookie_self_heal(
 
     for sel in selectors:
         if await _click_blocker(page, sel):
-            print(f"[+] Dismissed: {labels.get(sel, 'blocker')}", flush=True)
+            from browser_bot.submit.common import log_resilience
+
+            log_resilience(
+                "cookie_dismiss",
+                f"Dismissed blocker: {labels.get(sel, 'blocker')}",
+            )
             return
 
     for sel in DEFAULT_COOKIE_SELECTORS:
         if sel in selectors:
             continue
         if await _click_blocker(page, sel):
-            label = "cookie consent"
-            print(f"[+] Dismissed: {label}", flush=True)
+            from browser_bot.submit.common import log_resilience
+
+            log_resilience("cookie_dismiss", "Dismissed cookie consent banner")
             _persist_blocker(site, component, sel, label=label, action="click")
             return
 
@@ -474,12 +542,385 @@ async def check_submission_readiness(
     return warnings
 
 
+async def _turnstile_widget_visible(page: "Page") -> bool:
+    for sel in (*CLOUDFLARE_IFRAME_SELECTORS, *TURNSTILE_SELECTORS):
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            continue
+    for frame in page.frames:
+        frame_url = (frame.url or "").lower()
+        if "challenges.cloudflare.com" in frame_url or "turnstile" in frame_url:
+            return True
+    return False
+
+
+async def _cloudflare_challenge_visible(page: "Page") -> bool:
+    """True when a Cloudflare Turnstile / managed challenge page is showing."""
+    url = (page.url or "").lower()
+    if "challenges.cloudflare.com" in url:
+        return True
+    try:
+        body = (await page.inner_text("body")).lower()
+    except Exception:
+        body = ""
+    try:
+        title = (await page.title() or "").lower()
+    except Exception:
+        title = ""
+    has_cf = "cloudflare" in body or "cloudflare" in title
+    has_verify = any(
+        h in body or h in title
+        for h in ("verify you are human", "checking your browser", "just a moment")
+    )
+    if has_verify and (has_cf or "security check" in body or await _turnstile_widget_visible(page)):
+        return True
+    if has_cf and any(h in body for h in CLOUDFLARE_BODY_HINTS):
+        return True
+    if has_verify and await _turnstile_widget_visible(page):
+        return True
+    if await _turnstile_widget_visible(page) and not has_verify:
+        return True
+    return False
+
+
+async def _wait_for_turnstile_widget(page: "Page", timeout_sec: float = 12.0) -> None:
+    """Give Turnstile iframes time to mount after navigation."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        for sel in (
+            *CLOUDFLARE_IFRAME_SELECTORS,
+            "#cf-turnstile",
+            '[class*="cf-turnstile"]',
+            'div:has-text("Verify you are human")',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    return
+            except Exception:
+                continue
+        await asyncio.sleep(0.4)
+
+
+async def _turnstile_click_coordinates(page: "Page") -> list[tuple[float, float]]:
+    """Return viewport (x, y) points where the Turnstile checkbox is likely located."""
+    points: list[tuple[float, float]] = []
+    selectors = (
+        "#cf-turnstile",
+        '[class*="cf-turnstile"]',
+        'div:has-text("Verify you are human")',
+        'label:has-text("Verify you are human")',
+        *CLOUDFLARE_IFRAME_SELECTORS,
+    )
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            box = await loc.bounding_box()
+            if not box or box.get("width", 0) < 8 or box.get("height", 0) < 8:
+                continue
+            w, h = float(box["width"]), float(box["height"])
+            # Checkbox is usually on the left side of the widget row.
+            points.append((box["x"] + min(32.0, w * 0.12), box["y"] + h / 2))
+            points.append((box["x"] + w / 2, box["y"] + h / 2))
+        except Exception:
+            continue
+    return points
+
+
+async def _human_click_at(page: "Page", x: float, y: float) -> bool:
+    try:
+        from browser_bot.browser.human_behavior import human_mouse_move
+
+        await human_mouse_move(page, x, y)
+        await asyncio.sleep(random.uniform(0.08, 0.2))
+        await page.mouse.click(x, y, delay=random.randint(40, 120))
+        return True
+    except Exception:
+        try:
+            await page.mouse.click(x, y)
+            return True
+        except Exception:
+            return False
+
+
+async def _click_cloudflare_via_js(page: "Page") -> bool:
+    """Traverse shadow roots and click the first checkbox-like control."""
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                    function walk(root) {
+                        const nodes = root.querySelectorAll('*');
+                        for (const el of nodes) {
+                            if (el.shadowRoot && walk(el.shadowRoot)) return true;
+                            const role = el.getAttribute && el.getAttribute('role');
+                            const tag = (el.tagName || '').toLowerCase();
+                            if (role === 'checkbox' || tag === 'input' && el.type === 'checkbox') {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    return walk(document);
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def _try_click_cloudflare_checkbox(page: "Page") -> bool:
+    """Try several strategies to activate Turnstile. Returns True if any click was sent."""
+    strategies: list[str] = []
+
+    for x, y in await _turnstile_click_coordinates(page):
+        if await _human_click_at(page, x, y):
+            strategies.append(f"coordinates@{int(x)},{int(y)}")
+            await asyncio.sleep(1.2)
+            break
+
+    for iframe_sel in CLOUDFLARE_IFRAME_SELECTORS:
+        try:
+            fl = page.frame_locator(iframe_sel)
+            for inner in CLOUDFLARE_WIDGET_SELECTORS:
+                loc = fl.locator(inner).first
+                if await loc.count() == 0:
+                    continue
+                try:
+                    await loc.click(timeout=4000, delay=80)
+                    strategies.append(f"frame:{iframe_sel}:{inner}")
+                    await asyncio.sleep(1.0)
+                    break
+                except Exception:
+                    continue
+            if strategies:
+                break
+        except Exception:
+            continue
+
+    for frame in page.frames:
+        frame_url = (frame.url or "").lower()
+        if "challenges.cloudflare.com" not in frame_url and "turnstile" not in frame_url:
+            continue
+        for inner in CLOUDFLARE_WIDGET_SELECTORS:
+            try:
+                loc = frame.locator(inner).first
+                if await loc.count() == 0:
+                    continue
+                await loc.click(timeout=4000, delay=80)
+                strategies.append(f"child_frame:{inner}")
+                await asyncio.sleep(1.0)
+                break
+            except Exception:
+                continue
+        if strategies:
+            break
+
+    for sel in ('input[type="checkbox"]', '[role="checkbox"]', 'label:has-text("Verify")'):
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0 or not await loc.is_visible():
+                continue
+            await loc.click(timeout=4000, delay=80)
+            strategies.append(sel)
+            await asyncio.sleep(1.0)
+            break
+        except Exception:
+            continue
+
+    if await _click_cloudflare_via_js(page):
+        strategies.append("shadow_dom_js")
+        await asyncio.sleep(1.0)
+
+    if strategies:
+        from browser_bot.submit.common import log_resilience
+
+        log_resilience(
+            "cloudflare_click",
+            "Cloudflare auto-click attempt",
+            detail=", ".join(strategies),
+        )
+        return True
+    return False
+
+
+def _emit_cloudflare_waiting(site: str, *, remaining_sec: float) -> None:
+    from browser_bot.submit.common import log_airta_progress, log_resilience
+
+    log_resilience(
+        "cloudflare_wait",
+        "Cloudflare challenge — waiting for verification",
+        wait_sec=remaining_sec,
+        detail="Complete the checkbox in the visible browser window",
+    )
+    advice = [
+        "Complete the 'Verify you are human' checkbox in the live browser window.",
+        "Settings → Browser: set Fetch Method to human and turn off Headless.",
+        "Automated Turnstile bypass is unreliable; manual completion is expected for ChatGPT and similar targets.",
+    ]
+    log_airta_progress(
+        {
+            "type": "cloudflare_wait",
+            "kind": "cloudflare",
+            "message": "Cloudflare verification required - complete in the browser window.",
+            "remaining_sec": max(0, int(remaining_sec)),
+            "site": site,
+        }
+    )
+
+
+def _emit_cloudflare_headed_required(site: str) -> None:
+    from browser_bot.submit.common import log_airta_progress
+
+    advice = [
+        "Cloudflare Turnstile cannot be completed in a headless or pool browser.",
+        "Settings → Browser: set Fetch Method to human and Headless to off for this component.",
+        "For chatgpt.com, component config should include settings.FETCH_METHOD: human and HEADLESS: false.",
+        "Re-run tests after saving settings; complete the checkbox once in the visible browser window.",
+    ]
+    log_airta_progress(
+        {
+            "type": "blocked",
+            "kind": "cloudflare",
+            "message": "Cloudflare requires a visible browser (headed human mode).",
+            "action": "prompt_cloudflare",
+            "site": site,
+            "needs_headed_browser": True,
+            "stop_run": True,
+            "fatal": True,
+            "advice": advice,
+        }
+    )
+
+
+async def _resolve_cloudflare_challenge(
+    page: "Page",
+    *,
+    site: str,
+    component: str,
+) -> None:
+    """Detect Cloudflare challenge, try auto-click, then wait for manual completion in the browser."""
+    if not await _cloudflare_challenge_visible(page):
+        return
+
+    if _is_headless_browser():
+        from browser_bot.submit.common import log_resilience
+
+        log_resilience(
+            "cloudflare_headed_required",
+            "Cloudflare detected but browser is headless — Turnstile needs a visible window",
+            detail="Set Fetch Method=human and Headless=off, then re-run",
+        )
+        _emit_cloudflare_headed_required(site)
+        raise PageBlockedError(
+            "cloudflare",
+            advice=[
+                "Set Fetch Method to human and Headless to off in Settings → Browser (component overrides).",
+                "Re-run tests and complete the verification checkbox in the browser window.",
+            ],
+            message="Cloudflare requires headed human browser mode.",
+        )
+
+    wait_sec = DEFAULT_CLOUDFLARE_WAIT_SEC
+    try:
+        from browser_bot.config import EVASION_RETRY_WAIT_S
+
+        wait_sec = max(float(EVASION_RETRY_WAIT_S or 0), wait_sec)
+    except Exception:
+        pass
+    wait_sec = min(max(wait_sec, 30.0), 180.0)
+
+    from browser_bot.submit.common import log_resilience
+
+    log_resilience(
+        "cloudflare_detected",
+        "Cloudflare challenge detected — auto-click then manual verification",
+        wait_sec=wait_sec,
+    )
+    await _wait_for_turnstile_widget(page)
+
+    deadline = time.monotonic() + wait_sec
+    last_click = 0.0
+    last_ui_emit = 0.0
+    _emit_cloudflare_waiting(site, remaining_sec=wait_sec)
+
+    while time.monotonic() < deadline:
+        if not await _cloudflare_challenge_visible(page):
+            log_resilience("cloudflare_cleared", "Cloudflare challenge cleared")
+            return
+
+        now = time.monotonic()
+        if now - last_click >= DEFAULT_CLOUDFLARE_CLICK_INTERVAL_SEC:
+            last_click = now
+            clicked = await _try_click_cloudflare_checkbox(page)
+            if not clicked:
+                log_resilience(
+                    "cloudflare_click",
+                    "Cloudflare auto-click attempt (no checkbox target found)",
+                )
+
+        if now - last_ui_emit >= 15.0:
+            last_ui_emit = now
+            _emit_cloudflare_waiting(site, remaining_sec=deadline - now)
+
+        await asyncio.sleep(0.8)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except Exception:
+            pass
+
+    if not await _cloudflare_challenge_visible(page):
+        log_resilience("cloudflare_cleared", "Cloudflare challenge cleared")
+        return
+
+    from browser_bot.submit.common import log_airta_progress, log_resilience
+
+    log_resilience(
+        "cloudflare_timeout",
+        "Cloudflare verification timed out",
+        wait_sec=wait_sec,
+        detail="Complete the checkbox in the browser or adjust headed human settings",
+    )
+    advice = [
+        "Cloudflare blocked automated verification.",
+        "Settings → Browser: Fetch Method = human, Headless = off, then re-run tests.",
+        "Complete sign-in and the Turnstile checkbox once in the visible browser before batch runs.",
+    ]
+    log_airta_progress(
+        {
+            "type": "blocked",
+            "kind": "cloudflare",
+            "message": "Cloudflare verification not completed in time.",
+            "action": "prompt_cloudflare",
+            "site": site,
+            "stop_run": True,
+            "fatal": True,
+            "advice": advice,
+        }
+    )
+    raise PageBlockedError(
+        "cloudflare",
+        advice=advice,
+        message="Cloudflare verification not completed.",
+    )
+
+
 async def _detect_captcha(page: "Page") -> bool:
+    if await _cloudflare_challenge_visible(page):
+        return True
     try:
         body = (await page.inner_text("body")).lower()
     except Exception:
         body = ""
     if any(hint in body for hint in CAPTCHA_HINTS):
+        return True
+    if "verify you are human" in body:
         return True
     for frame_sel in ('iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]', '[class*="captcha"]'):
         try:
@@ -505,6 +946,8 @@ async def detect_heuristic_blockers(
 
     if await _rate_limit_visible(page, blockers):
         await _resolve_rate_limit(page, site=site, component=component, blockers=blockers)
+
+    await _resolve_cloudflare_challenge(page, site=site, component=component)
 
     if await _detect_captcha(page):
         from browser_bot.submit.common import log_airta_progress
@@ -536,10 +979,11 @@ async def ensure_page_ready_for_submit(
     start_url: str,
     blockers: list[dict] | None = None,
 ) -> None:
-    """Full pre-submit pipeline: login wall, cookies, readiness, heuristics."""
+    """Full pre-submit pipeline: login wall, cookies, cloudflare, readiness, heuristics."""
     await _resolve_login_wall(page, site=site, component=component, start_url=start_url)
     await _attempt_cookie_self_heal(page, site=site, component=component, blockers=blockers)
     await _resolve_login_wall(page, site=site, component=component, start_url=start_url)
+    await _resolve_cloudflare_challenge(page, site=site, component=component)
     await _resolve_rate_limit(page, site=site, component=component, blockers=blockers)
 
     warnings = await check_submission_readiness(page, inputs, submit_selector=submit_selector)

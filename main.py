@@ -300,6 +300,8 @@ def _run_tests(args) -> None:
         component = menu.current_component
 
     print(f"[*] Running tests: {site}/{component} ({suite_path.name}, mode={mode})...")
+    os.environ["AIRTA_SITE"] = site
+    os.environ["AIRTA_COMPONENT"] = component
     bb_main_path = _browser_bot_dir / "main.py"
     bb_spec = importlib.util.spec_from_file_location("browser_bot_main", bb_main_path)
     bb_main = importlib.util.module_from_spec(bb_spec)
@@ -407,6 +409,7 @@ def _run_export(args) -> None:
         api_key=api_key,
         user_id=user_id,
         default_level=args.default_level,
+        risk_levels=getattr(args, "risk_levels", None),
         batch_size=args.batch_size,
         batch_delay_seconds=args.batch_delay,
     )
@@ -879,6 +882,12 @@ def main() -> None:
         type=float,
         default=None,
         help="Seconds between batches (default: GENBOUNTY_EXPORT_DELAY_SECONDS or 2).",
+    )
+    exp_p.add_argument(
+        "--risk-levels",
+        metavar="LEVELS",
+        default=None,
+        help="Comma-separated severities to export (e.g. critical,high,medium). Default: all.",
     )
 
     args = parser.parse_args()

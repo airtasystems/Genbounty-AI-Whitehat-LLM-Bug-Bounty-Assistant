@@ -62,6 +62,12 @@ async def capture_login(login_url: str, *, force_persistent: bool = False) -> st
     Returns domain on success.
     force_persistent=True forces persistent profile login flow even if config disables it.
     """
+    if not isinstance(login_url, str):
+        login_url = str(login_url or "").strip()
+    else:
+        login_url = login_url.strip()
+    if not login_url:
+        return None
     domain = get_domain_from_url(login_url)
     if not domain:
         return None

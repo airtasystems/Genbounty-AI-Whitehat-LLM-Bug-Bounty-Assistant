@@ -823,13 +823,59 @@ async def api_get_credentials():
     }
 
 
+def _normalize_env_target(raw: str) -> str:
+    """Map TARGET .env value to site directory name (host:port, no scheme)."""
+    text = (raw or "").strip().strip("/")
+    if not text:
+        return ""
+    if "://" in text or text.startswith("//"):
+        domain = get_domain_from_url(text if "://" in text else f"https://{text}")
+        return domain or text
+    return text
+
+
+def _resolve_env_site_component(target: str, component: str) -> tuple[str, str]:
+    """Match .env TARGET/COMPONENT to existing site and component ids."""
+    site = _normalize_env_target(target)
+    comp = (component or "").strip()
+    if not site:
+        return "", comp
+
+    sites = list_sites()
+    if site not in sites:
+        lower = site.lower()
+        for name in sites:
+            if name.lower() == lower:
+                site = name
+                break
+
+    if not comp:
+        return site, ""
+
+    if site in sites or any(s.lower() == site.lower() for s in sites):
+        if site not in sites:
+            site = next(s for s in sites if s.lower() == site.lower())
+        comps = list_components(site)
+        if comp not in comps:
+            lower_c = comp.lower()
+            for name in comps:
+                if name.lower() == lower_c:
+                    comp = name
+                    break
+    return site, comp
+
+
 @app.get("/api/env-defaults")
 async def api_env_defaults():
     """Return TARGET and COMPONENT from .env for auto-selecting site/component on startup."""
     env = _read_env()
+    target, component = _resolve_env_site_component(
+        env.get("TARGET", ""),
+        env.get("COMPONENT", ""),
+    )
     return {
-        "target": env.get("TARGET", ""),
-        "component": env.get("COMPONENT", ""),
+        "target": target,
+        "component": component,
     }
 
 

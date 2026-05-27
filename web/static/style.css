@@ -754,7 +754,64 @@ select { cursor: pointer; }
 .console .line-ok { color: var(--green); }
 .console .line-err { color: var(--red); }
 .console .line-info { color: var(--accent-glow); }
-.console .line-evasion { color: var(--orange); font-size: 12px; }
+.console .line-evasion,
+.console .line-resilience {
+  color: var(--orange);
+  font-size: 12px;
+}
+
+.output-panel-header-hint {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--orange);
+  opacity: 0.9;
+}
+
+.output-panel-hint {
+  display: block;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.line-resilience-inline {
+  color: var(--orange);
+}
+
+.modal-note-warn {
+  color: var(--orange);
+  font-weight: 500;
+}
+
+.cloudflare-settings-form {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+
+.cloudflare-settings-form .form-row {
+  margin-bottom: 10px;
+}
+
+.cloudflare-settings-form .form-row:last-child {
+  margin-bottom: 0;
+}
+
+.cloudflare-settings-form label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.cloudflare-settings-form select.input {
+  width: 100%;
+  max-width: 240px;
+}
 
 .run-progress-wrap {
   margin-top: 12px;
@@ -1042,6 +1099,15 @@ select { cursor: pointer; }
 .export-left { display: flex; flex-direction: column; gap: 16px; }
 .export-right { display: flex; flex-direction: column; }
 .export-preview { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.export-risk-levels { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 4px; }
+.export-risk-chip { margin: 0; font-size: 13px; }
+.export-risk-chip .risk-label { text-transform: capitalize; }
+.export-risk-chip .risk-critical { color: #f87171; }
+.export-risk-chip .risk-high { color: #fb923c; }
+.export-risk-chip .risk-medium { color: #fbbf24; }
+.export-risk-chip .risk-low { color: #a3e635; }
+.export-risk-chip .risk-informational { color: var(--text-dim); }
+.export-risk-chip .risk-indeterminate { color: var(--text-faint); }
 .badge-neutral { background: var(--bg-hover); color: var(--text-dim); border-radius: 4px; font-size: 12px; font-weight: 500; }
 .badge-info { background: var(--accent-muted); color: var(--accent-glow); border-radius: 4px; font-size: 12px; font-weight: 500; }
 .cfg-note { font-size: 12px; color: var(--text-dim); margin: 0 0 10px; line-height: 1.5; }

@@ -539,6 +539,14 @@ createApp({
       { id: '4h', label: 'Last 4 hours', seconds: 14400 },
       { id: '24h', label: 'Last 24 hours (daily)', seconds: 86400 },
     ];
+    const EXPORT_RISK_LEVELS = [
+      { id: 'critical', label: 'Critical' },
+      { id: 'high', label: 'High' },
+      { id: 'medium', label: 'Medium' },
+      { id: 'low', label: 'Low' },
+      { id: 'informational', label: 'Informational' },
+      { id: 'indeterminate', label: 'Indeterminate' },
+    ];
     const RISK_WINDOW_PREFIX = '__window:';
 
     function riskWindowValue(windowId) {
@@ -577,13 +585,51 @@ createApp({
       return counts;
     });
 
+    const exp = reactive({
+      report: '',
+      user_id: '',
+      autoAfterAssess: false,
+      riskLevels: {
+        critical: true,
+        high: true,
+        medium: true,
+        low: false,
+        informational: false,
+        indeterminate: false,
+      },
+    });
+    const expSaved = ref(false);
+    const expSaving = ref(false);
+    const expSaveError = ref('');
+
+    function normalizeExportRiskLevel(row) {
+      const aliases = { compliant: 'low', mitigated: 'low' };
+      const raw = String(row?.risk_level || '').trim().toLowerCase();
+      const level = aliases[raw] || raw;
+      return EXPORT_RISK_LEVELS.some(l => l.id === level) ? level : 'indeterminate';
+    }
+
+    const expSelectedRiskLevels = computed(() =>
+      EXPORT_RISK_LEVELS.filter(l => exp.riskLevels[l.id]).map(l => l.id),
+    );
+
+    function countExportableResults(rows) {
+      const allowed = new Set(expSelectedRiskLevels.value);
+      if (!allowed.size) return 0;
+      return (rows || []).filter(r => allowed.has(normalizeExportRiskLevel(r))).length;
+    }
+
+    function toggleExpRiskLevel(id) {
+      exp.riskLevels[id] = !exp.riskLevels[id];
+    }
+
     const exportEnabled = computed(() => {
-      if (!exp.report) return false;
+      if (!exp.report || !expSelectedRiskLevels.value.length) return false;
       const windowId = riskWindowIdFromValue(exp.report);
       if (windowId) return (exportWindowCounts.value[windowId] || 0) > 0;
+      if (expPreview.value && expPreview.value.exportCount === 0) return false;
       return true;
     });
-    const exp = reactive({ report: '', user_id: '' });
     const expResult = ref(null);
     const expPreview = ref(null);
     // host + api_key stored server-side in .env; user_id is per-export
@@ -599,9 +645,69 @@ createApp({
         expCreds.has_api_key = c.has_api_key || false;
         expCredsEdit.host = c.host || '';
         expCredsEdit.api_key = '';
-        // Pre-fill user_id from .env if not already set by the user
-        if (c.user_id && !exp.user_id) exp.user_id = c.user_id;
       } catch { /* ignore */ }
+    }
+
+    function applyExportConfig(exportCfg) {
+      const block = exportCfg || {};
+      exp.autoAfterAssess = !!block.auto_after_assess;
+      const levels = Array.isArray(block.risk_levels) ? block.risk_levels : [];
+      for (const lvl of EXPORT_RISK_LEVELS) {
+        exp.riskLevels[lvl.id] = levels.length ? levels.includes(lvl.id) : exp.riskLevels[lvl.id];
+      }
+      if (block.user_id) exp.user_id = block.user_id;
+    }
+
+    async function loadExportSettings() {
+      if (!site.value || !component.value) return;
+      expSaveError.value = '';
+      try {
+        await loadExpCreds();
+        const data = await api(
+          `/api/sites/${encodeURIComponent(site.value)}/${encodeURIComponent(component.value)}/config`,
+        );
+        applyExportConfig(data.export);
+        if (!exp.user_id) {
+          const c = await api('/api/credentials');
+          if (c.user_id) exp.user_id = c.user_id;
+        }
+      } catch (e) {
+        expSaveError.value = String(e);
+      }
+    }
+
+    async function saveExportSettings() {
+      if (!site.value || !component.value) return;
+      expSaving.value = true;
+      expSaveError.value = '';
+      expSaved.value = false;
+      try {
+        const existing = await api(
+          `/api/sites/${encodeURIComponent(site.value)}/${encodeURIComponent(component.value)}/config`,
+        );
+        const payload = {
+          ...existing,
+          export: {
+            auto_after_assess: exp.autoAfterAssess,
+            risk_levels: expSelectedRiskLevels.value,
+            user_id: (exp.user_id || '').trim(),
+          },
+        };
+        await api(
+          `/api/sites/${encodeURIComponent(site.value)}/${encodeURIComponent(component.value)}/config`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: payload }),
+          },
+        );
+        expSaved.value = true;
+        setTimeout(() => { expSaved.value = false; }, 3000);
+      } catch (e) {
+        expSaveError.value = String(e);
+      } finally {
+        expSaving.value = false;
+      }
     }
 
     async function saveExpCreds() {
@@ -633,26 +739,41 @@ createApp({
       expCredsMsg.value = 'Credentials cleared';
     }
 
-    watch(() => exp.report, async (path) => {
+    async function refreshExpPreview() {
+      const path = exp.report;
       expPreview.value = null;
-      expResult.value = null;
       if (!path) return;
       const windowId = riskWindowIdFromValue(path);
+      const levels = expSelectedRiskLevels.value;
       if (windowId) {
         expPreview.value = {
           batchReports: exportWindowCounts.value[windowId] || 0,
           batchLabel: RISK_TIME_WINDOWS.find(w => w.id === windowId)?.label || windowId,
+          riskLevels: levels,
         };
         return;
       }
       try {
         const data = await api(`/api/log?path=${encodeURIComponent(path)}`);
+        const rows = data.adversarial_results || [];
+        const exportCount = countExportableResults(rows);
         expPreview.value = {
-          count: (data.adversarial_results || []).length,
+          count: rows.length,
+          exportCount,
           playbook: data.playbook || '',
           timestamp: data.timestamp || '',
+          riskLevels: levels,
         };
       } catch { /* ignore */ }
+    }
+
+    watch(() => exp.report, async () => {
+      expResult.value = null;
+      await refreshExpPreview();
+    });
+
+    watch(expSelectedRiskLevels, async () => {
+      await refreshExpPreview();
     });
     const cache = reactive({ deleteOnServer: false, useGeminiCache: false, effectiveGeminiCache: false, componentOverride: null });
     const cacheSettingsSaving = ref(false);
@@ -1198,7 +1319,7 @@ createApp({
       },
       export: {
         title: 'Submit Findings to Genbounty',
-        text: 'Submit assessed findings to your Genbounty program via the security assessment import API. Export a single pipeline report or batch-export all reports from the last hour, 4 hours, or 24 hours.',
+        text: 'Configure export settings (risk levels, auto-submit after assessment) and save to this component\'s config.yaml. Settings apply when you submit manually or when assessment runs from Run Tests or Finding Assessment. Credentials stay in .env.',
       },
       cache: {
         title: 'Clear Cache',
@@ -1276,6 +1397,25 @@ createApp({
     const runPreviewModalLabel = ref('');
     const showRunLoginModal = ref(false);
     const showRunRateLimitModal = ref(false);
+    const showRunCloudflareModal = ref(false);
+    const pendingRunAfterCloudflare = ref(false);
+    const runCloudflareStopIssued = ref(false);
+    const runCloudflareModalShown = ref(false);
+    const runCloudflareTestsStopped = ref(false);
+    const runCloudflareSaving = ref(false);
+    const runCloudflareError = ref('');
+    const runCloudflareSettings = reactive({
+      FETCH_METHOD: 'human',
+      HEADLESS: false,
+      cloudflare_headed: true,
+    });
+    const cloudflareModalNeedsSettings = computed(() => {
+      return !!runBlockedInfo.value?.needs_headed_browser;
+    });
+    const cloudflareModalTimedOut = computed(() => {
+      const p = runBlockedInfo.value;
+      return !!(p?.stop_run && p?.kind === 'cloudflare' && !p?.needs_headed_browser);
+    });
     const runRateLimitBackoffSec = ref(60);
     const rateLimitCountdown = ref(0);
     const rateLimitWaiting = ref(false);
@@ -1431,6 +1571,7 @@ createApp({
       if (p.type === 'run_start') return 'Starting tests…';
       if (p.type === 'run_done') return 'Tests complete';
       if (p.type === 'blocked') return p.message || 'Tests paused';
+      if (p.type === 'resilience') return p.message || 'Resilience attempt';
       return `${p.mode === 'multi' ? 'Multi-turn' : 'Single'} · ${p.current ?? 0} / ${p.total ?? 0} prompts`;
     });
 
@@ -1466,7 +1607,7 @@ createApp({
 
     function lineClass(line) {
       const t = line.trimStart();
-      if (t.startsWith('[evasion]')) return 'line-evasion';
+      if (t.startsWith('[resilience]') || t.startsWith('[evasion]')) return 'line-resilience';
       if (line.startsWith('[+]') || line.startsWith('[*]')) return 'line-ok';
       if (line.startsWith('[!]') || line.startsWith('[-]') || line.startsWith('[error]')) return 'line-err';
       if (line.startsWith('  ')) return 'line-info';
@@ -1477,6 +1618,28 @@ createApp({
       sites.value = await api('/api/sites');
       allStrategies.value = await api('/api/strategies');
       allPlaybooks.value = await api('/api/playbooks');
+    }
+
+    /** Apply TARGET/COMPONENT from .env (server normalizes URLs to site ids). Returns true if selected. */
+    async function applyEnvDefaults() {
+      const defaults = await api('/api/env-defaults');
+      const target = (defaults.target || '').trim();
+      if (!target || !sites.value.includes(target)) return false;
+
+      const comps = await api(`/api/sites/${encodeURIComponent(target)}/components`);
+      let comp = (defaults.component || '').trim();
+      if (comp && !comps.includes(comp)) return false;
+      if (!comp) {
+        if (comps.length === 1) comp = comps[0];
+        else return false;
+      }
+
+      site.value = target;
+      components.value = comps;
+      component.value = comp;
+      await loadContext();
+      await checkSetupAndNavigate();
+      return true;
     }
 
     async function onSiteChange() {
@@ -1496,6 +1659,7 @@ createApp({
         const s = encodeURIComponent(site.value), c = encodeURIComponent(component.value);
         runStrategies.value = await api(`/api/sites/${s}/${c}/strategies`);
         await loadLogs();
+        if (tab.value === 'export' || tab.value === 'risk') await loadExportSettings();
         if (tab.value === 'settings' && settingsTab.value === 'component') loadCompCfg();
         if (tab.value === 'tests') await tmLoadStrategies();
       }
@@ -1630,7 +1794,21 @@ createApp({
             if (p.type === 'screenshot') {
               if (isRunJob) updateRunPreview(jobId, p.slot ?? 0);
             } else if (isRunJob || isRiskJob) {
-              if (p.type === 'blocked' && isRunJob) {
+              if (p.type === 'cloudflare_wait' && isRunJob) {
+                runBlockedInfo.value = { ...runBlockedInfo.value, ...p, kind: 'cloudflare' };
+                if (!runCloudflareModalShown.value) {
+                  runCloudflareModalShown.value = true;
+                  pendingRunAfterCloudflare.value = true;
+                  tab.value = 'run';
+                  showRunCloudflareModal.value = true;
+                }
+                runProgress.value = {
+                  ...runProgress.value,
+                  phase: 'blocked',
+                  remaining_sec: p.remaining_sec,
+                  pct: runProgress.value?.pct ?? 0,
+                };
+              } else if (p.type === 'blocked' && isRunJob) {
                 runBlockedInfo.value = p;
                 if (p.kind === 'login_required' || p.action === 'prompt_login' || p.action === 'start_login') {
                   pendingRunAfterLogin.value = true;
@@ -1642,6 +1820,8 @@ createApp({
                   runRateLimitBackoffSec.value = Math.max(1, Math.round(Number(p.backoff_sec) || 60));
                   tab.value = 'run';
                   showRunRateLimitModal.value = true;
+                } else if (p.kind === 'cloudflare' || p.action === 'prompt_cloudflare') {
+                  handleRunCloudflareBlocked(p);
                 }
                 runProgress.value = { ...p, pct: runProgress.value?.pct ?? 0, phase: 'blocked' };
               } else {
@@ -1861,7 +2041,8 @@ createApp({
     }
 
     async function startLogin(url) {
-      const targetUrl = url || loginUrl.value;
+      const targetUrl = (typeof url === 'string' ? url : '') || loginUrl.value;
+      if (!targetUrl || !site.value) return;
       const j = await startJob('login', { url: targetUrl });
       loginJobId.value = j.id;
     }
@@ -1922,6 +2103,99 @@ createApp({
       showRunRateLimitModal.value = false;
     }
 
+    function resetRunCloudflareState() {
+      runCloudflareStopIssued.value = false;
+      runCloudflareModalShown.value = false;
+      runCloudflareTestsStopped.value = false;
+      runCloudflareSaving.value = false;
+      runCloudflareError.value = '';
+      runCloudflareSettings.FETCH_METHOD = 'human';
+      runCloudflareSettings.HEADLESS = false;
+      runCloudflareSettings.cloudflare_headed = true;
+    }
+
+    async function stopActiveRunTests(reason) {
+      const jid = activeJobs.run_tests;
+      if (!jid || runCloudflareStopIssued.value) return;
+      runCloudflareStopIssued.value = true;
+      runCloudflareTestsStopped.value = true;
+      try {
+        await cancelJob(jid);
+      } catch (e) {
+        runCloudflareError.value = reason || String(e);
+      }
+    }
+
+    function handleRunCloudflareBlocked(p) {
+      const needsSettings = !!p.needs_headed_browser;
+      const shouldStop = needsSettings || !!(p.stop_run || p.fatal);
+      tab.value = 'run';
+      if (shouldStop) {
+        void stopActiveRunTests(
+          needsSettings
+            ? 'Cloudflare requires headed human browser settings.'
+            : 'Cloudflare verification did not complete in time.',
+        );
+      } else {
+        pendingRunAfterCloudflare.value = true;
+      }
+      if (!runCloudflareModalShown.value) {
+        runCloudflareModalShown.value = true;
+        showRunCloudflareModal.value = true;
+      }
+    }
+
+    function onCloudflareBackdropClick() {
+      if (!cloudflareModalNeedsSettings.value) dismissRunCloudflareModal();
+    }
+
+    function dismissRunCloudflareModal() {
+      showRunCloudflareModal.value = false;
+      pendingRunAfterCloudflare.value = false;
+    }
+
+    async function cancelRunTestsFromCloudflare() {
+      await stopActiveRunTests('Stopped from Cloudflare dialog.');
+      dismissRunCloudflareModal();
+    }
+
+    async function rerunAfterCloudflareTimeout() {
+      dismissRunCloudflareModal();
+      resetRunCloudflareState();
+      await startRunTests();
+    }
+
+    async function applyCloudflareSettingsAndRerun() {
+      if (!site.value || !component.value) return;
+      runCloudflareError.value = '';
+      runCloudflareSaving.value = true;
+      try {
+        const s = encodeURIComponent(site.value);
+        const c = encodeURIComponent(component.value);
+        const existing = await api(`/api/sites/${s}/${c}/config`);
+        const settings = { ...(existing.settings || {}), FETCH_METHOD: runCloudflareSettings.FETCH_METHOD };
+        settings.HEADLESS = !!runCloudflareSettings.HEADLESS;
+        const submission = { ...(existing.submission || {}) };
+        if (runCloudflareSettings.cloudflare_headed) {
+          submission.cloudflare_headed = true;
+        } else {
+          delete submission.cloudflare_headed;
+        }
+        await api(`/api/sites/${s}/${c}/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: { ...existing, settings, submission } }),
+        });
+        dismissRunCloudflareModal();
+        resetRunCloudflareState();
+        await startRunTests();
+      } catch (e) {
+        runCloudflareError.value = String(e);
+      } finally {
+        runCloudflareSaving.value = false;
+      }
+    }
+
     function _clearRateLimitTimer() {
       if (rateLimitTimer) {
         clearInterval(rateLimitTimer);
@@ -1956,6 +2230,10 @@ createApp({
       }
       if (runBlockedInfo.value?.kind === 'rate_limited') {
         showRunRateLimitModal.value = true;
+        return;
+      }
+      if (runBlockedInfo.value?.kind === 'cloudflare') {
+        showRunCloudflareModal.value = true;
         return;
       }
       showRunTroubleshoot.value = true;
@@ -2045,8 +2323,11 @@ createApp({
       runBlockedInfo.value = null;
       showRunLoginModal.value = false;
       showRunRateLimitModal.value = false;
+      showRunCloudflareModal.value = false;
+      resetRunCloudflareState();
       pendingRunAfterLogin.value = false;
       pendingRunAfterRateLimit.value = false;
+      pendingRunAfterCloudflare.value = false;
       runLoginUrl.value = '';
       authSaveError.value = '';
       rateLimitWaiting.value = false;
@@ -2066,17 +2347,20 @@ createApp({
     async function startSecurityAssess() {
       runProgress.value = null;
       const windowId = riskWindowIdFromValue(risk.log);
+      const params = {};
       if (windowId) {
-        await startJob('security_assess', { time_window: windowId });
+        params.time_window = windowId;
       } else {
-        await startJob('security_assess', { attack_log: risk.log });
+        params.attack_log = risk.log;
       }
+      await startJob('security_assess', params);
     }
 
     async function startExport() {
       expResult.value = null;
+      if (!expSelectedRiskLevels.value.length) return;
       const windowId = riskWindowIdFromValue(exp.report);
-      const params = { user_id: exp.user_id };
+      const params = {};
       if (windowId) {
         params.time_window = windowId;
       } else {
@@ -2128,11 +2412,12 @@ createApp({
         // Pre-fill from .env defaults if available
         try {
           const defaults = await api('/api/env-defaults');
-          if (defaults.target) {
+          if (defaults.target && sites.value.includes(defaults.target)) {
             modalSite.value = defaults.target;
             modalComponents.value = await api(`/api/sites/${encodeURIComponent(defaults.target)}/components`);
-            if (defaults.component) modalComponent.value = defaults.component;
-            else modalComponent.value = '';
+            modalComponent.value = defaults.component && modalComponents.value.includes(defaults.component)
+              ? defaults.component
+              : '';
             modalRenameSite.value = modalSite.value;
             modalRenameComponent.value = modalComponent.value;
           } else {
@@ -2157,21 +2442,8 @@ createApp({
       await loadSites();
       await refreshJobs();
       if (!site.value) {
-        // Check .env for TARGET / COMPONENT defaults - skip modal if both are set
         try {
-          const defaults = await api('/api/env-defaults');
-          if (defaults.target && defaults.component) {
-            const s = defaults.target;
-            const comps = await api(`/api/sites/${encodeURIComponent(s)}/components`);
-            if (comps.includes(defaults.component)) {
-              site.value = s;
-              components.value = comps;
-              component.value = defaults.component;
-              await loadContext();
-              await checkSetupAndNavigate();
-              return; // skip modal entirely
-            }
-          }
+          if (await applyEnvDefaults()) return;
         } catch { /* fall through to modal */ }
         openModal();
       }
@@ -2182,9 +2454,9 @@ createApp({
         if (settingsTab.value === 'browser') loadConfig();
         else if (settingsTab.value === 'component') loadCompCfg();
         else if (settingsTab.value === 'cache') loadCacheSettings();
-      } else if (tab.value === 'export') {
-        loadExpCreds();
-        loadLogs();
+      } else if (tab.value === 'export' || tab.value === 'risk') {
+        loadExportSettings();
+        if (tab.value === 'export') loadLogs();
       } else if (tab.value === 'tests') tmLoadStrategies();
       else if (tab.value === 'payloads') { loadPayloadTypes(); loadPayloadFiles(); }
       else if (tab.value === 'discover') loadAuthStatus();
@@ -2203,7 +2475,11 @@ createApp({
       site, component, sites, components, tab, settingsTab, tabs, jobsOpen, jobs, activeJobs,
       showRunTroubleshoot,
       showRunLoginModal, runLoginUrl, runBlockedInfo, pendingRunAfterLogin, authSaving, authSaveError,
-      showRunRateLimitModal, runRateLimitBackoffSec, rateLimitCountdown, rateLimitWaiting, pendingRunAfterRateLimit,
+      showRunRateLimitModal, showRunCloudflareModal, pendingRunAfterCloudflare,
+      cloudflareModalNeedsSettings, cloudflareModalTimedOut, runCloudflareSettings, runCloudflareSaving, runCloudflareError,
+      runCloudflareTestsStopped, dismissRunCloudflareModal, onCloudflareBackdropClick,
+      cancelRunTestsFromCloudflare, applyCloudflareSettingsAndRerun, rerunAfterCloudflareTimeout,
+      runRateLimitBackoffSec, rateLimitCountdown, rateLimitWaiting, pendingRunAfterRateLimit,
       confirmRateLimitResume, dismissRunRateLimitModal,
       runPreviewBySlot, runPreviewConfig, runPreviewSlotIndices,
       previewForSlot, hasRunLivePreview, runLivePanelVisible, runLivePanelOpen, runPreviewModalSlot,
@@ -2211,7 +2487,7 @@ createApp({
       openRunPreviewModal, closeRunPreviewModal,
       confirmRunLogin, saveAuth, dismissRunLoginModal, onRunTroubleshoot,
       allStrategies, allPlaybooks, runStrategies, runPlaybooks, runAllPlaybooks, logs,
-      gen, run, runArtifactStatus, runUploadWarning, risk, RISK_TIME_WINDOWS, riskWindowCounts, riskAssessEnabled, riskWindowValue, exportWindowCounts, exportEnabled, exp, cache,
+      gen, run, runArtifactStatus, runUploadWarning, risk, RISK_TIME_WINDOWS, riskWindowCounts, riskAssessEnabled, riskWindowValue, exportWindowCounts, exportEnabled, exp, EXPORT_RISK_LEVELS, expSelectedRiskLevels, toggleExpRiskLevel, cache,
       showPlaybookModal, pbForm, pbGenerating, pbError, pbMsg, pbIdTouched, pbSuggestId, openPlaybookModal, closePlaybookModal, submitPlaybookGenerate,
       showModal, modalSite, modalComponent, modalComponents, modalNewSite, modalNewComponent,
       modalRenameSite, modalRenameComponent, modalError, modalMsg,
@@ -2249,7 +2525,8 @@ createApp({
       startRunTests, startSampleRequest, startSecurityAssess, startExport, startClearCache,
       loadCacheSettings, saveCacheSettings, cacheSettingsSaving, cacheSettingsMsg,
       expResult, expPreview, expCreds, expCredsEdit, expCredsSaving, expCredsMsg,
-      loadExpCreds, saveExpCreds, clearExpCreds,
+      loadExpCreds, saveExpCreds, clearExpCreds, loadExportSettings, saveExportSettings,
+      expSaved, expSaving, expSaveError,
       cancelJob, saveConfig, toggleBlocked,
     };
   }

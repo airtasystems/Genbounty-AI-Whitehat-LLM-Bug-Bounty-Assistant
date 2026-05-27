@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 from browser_bot.browser.human_behavior import human_mouse_wander
 from browser_bot.config import EVASION_REQUEST_DELAY_S, FETCH_METHOD, get_posts_strings, get_suite_test_cases
 from browser_bot.live_preview import live_preview_context
-from browser_bot.page_blockers import PageBlockedError, ensure_page_ready_for_submit
+from browser_bot.page_blockers import (
+    PageBlockedError,
+    _resolve_cloudflare_challenge,
+    ensure_page_ready_for_submit,
+    submission_needs_headed_human,
+)
 from browser_bot.sites import get_storage_state_path, get_submission_config
 
 from browser_bot.submit.common import (
@@ -56,6 +61,9 @@ async def do_ui_submit_with_page(
         await asyncio.sleep(0.25)
         if human_behavior:
             await human_mouse_wander(page, count=1)
+
+        if site and component:
+            await _resolve_cloudflare_challenge(page, site=site, component=component)
 
         await ensure_page_ready_for_submit(
             page,
@@ -123,13 +131,18 @@ async def run_ui_submission_single(
     submit_via = sub.get("submit_via", "click")
     response_wait_ms = int(sub.get("response_wait_ms", 5000) or 5000)
 
+    headed_human_only = submission_needs_headed_human(site, component)
     fetchers_to_try: list[tuple] = []
-    if pool_fetcher:
-        fetchers_to_try.append((pool_fetcher, False))
-    if cluster_fetcher:
-        fetchers_to_try.append((cluster_fetcher, False))
-    if human_fetcher:
-        fetchers_to_try.append((human_fetcher, True))
+    if headed_human_only:
+        if human_fetcher:
+            fetchers_to_try.append((human_fetcher, True))
+    else:
+        if pool_fetcher:
+            fetchers_to_try.append((pool_fetcher, False))
+        if cluster_fetcher:
+            fetchers_to_try.append((cluster_fetcher, False))
+        if human_fetcher:
+            fetchers_to_try.append((human_fetcher, True))
 
     if not fetchers_to_try:
         return [], None
@@ -142,7 +155,7 @@ async def run_ui_submission_single(
 
     method = FETCH_METHOD.lower()
     parallel_fetchers = []
-    if len(posts) > 1:
+    if len(posts) > 1 and not headed_human_only:
         parallel_fetchers = parallel_fetchers_for_ui(method, pool_fetcher, cluster_fetcher)
 
     page_kwargs = dict(
@@ -215,7 +228,13 @@ async def run_ui_submission_single(
         )
 
         async def _retry_fast_then_human(text: str, tc: dict | None = None):
+            from browser_bot.submit.common import log_resilience
+
             for fetcher in parallel_fetchers[1:]:
+                log_resilience(
+                    "fetcher_fallback",
+                    "Prompt failed on primary fetcher — retrying with alternate tier",
+                )
                 try:
                     retry_result = await _run_one(text, fetcher, tc=tc)
                 except PageBlockedError:
@@ -224,6 +243,10 @@ async def run_ui_submission_single(
                     retry_result = None
                 if retry_result and retry_result[1]:
                     return retry_result
+            log_resilience(
+                "fetcher_fallback",
+                "Fast fetchers exhausted — falling back to human browser fetcher",
+            )
             return await _run_one_with_human(text, tc)
 
         for text, tc, r in zip(posts, case_list, parallel_results):

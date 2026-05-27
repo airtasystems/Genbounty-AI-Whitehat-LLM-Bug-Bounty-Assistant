@@ -41,6 +41,16 @@ VALID_SEVERITIES = frozenset({
     "critical",
 })
 
+# Ordered list for UI/CLI (highest severity first).
+EXPORT_RISK_LEVELS = (
+    "critical",
+    "high",
+    "medium",
+    "low",
+    "informational",
+    "indeterminate",
+)
+
 _LEGACY_SEVERITY_ALIASES = {
     "mitigated": "low",
     "compliant": "low",
@@ -158,6 +168,39 @@ def normalize_severity(value: object, default: str | None = None) -> str:
         if normalized_default in VALID_SEVERITIES:
             return normalized_default
     return "indeterminate"
+
+
+def normalize_export_risk_levels(levels: object) -> set[str] | None:
+    """Parse UI/CLI risk level filter. None means export all severities."""
+    if levels is None:
+        return None
+    if isinstance(levels, str):
+        parts = [p.strip() for p in levels.replace(",", " ").split() if p.strip()]
+        levels = parts
+    if not isinstance(levels, (list, tuple, set, frozenset)):
+        return None
+    out: set[str] = set()
+    for raw in levels:
+        if isinstance(raw, str) and raw.strip():
+            level = normalize_severity(raw.strip())
+            if level in VALID_SEVERITIES:
+                out.add(level)
+    return out or None
+
+
+def filter_results_by_risk_levels(
+    results: list[dict],
+    risk_levels: set[str] | None,
+    *,
+    default_severity: str | None = None,
+) -> list[dict]:
+    if not risk_levels:
+        return results
+    return [
+        item
+        for item in results
+        if normalize_severity(item.get("risk_level"), default_severity) in risk_levels
+    ]
 
 
 def _attack_blocked(severity: str) -> bool:
@@ -574,6 +617,7 @@ def export_pipeline_report(
     api_key: str,
     user_id: str,
     default_level: str | None = None,
+    risk_levels: list[str] | set[str] | None = None,
     batch_size: int | None = None,
     batch_delay_seconds: float | None = None,
 ) -> list[dict]:
@@ -582,8 +626,18 @@ def export_pipeline_report(
     if export_schema() == "security":
         results = enrich_results_for_export(data, results)
 
+    allowed_levels = normalize_export_risk_levels(risk_levels)
+    if allowed_levels is not None:
+        before = len(results)
+        results = filter_results_by_risk_levels(results, allowed_levels, default_severity=default_level)
+        label = ", ".join(level for level in EXPORT_RISK_LEVELS if level in allowed_levels)
+        print(f"[*] Risk level filter ({label}): {len(results)}/{before} result(s)")
+
     if not results:
-        print("[-] No assessment results found in report (adversarial_results empty).")
+        if allowed_levels is not None:
+            print("[-] No results match the selected risk levels.")
+        else:
+            print("[-] No assessment results found in report (adversarial_results empty).")
         return []
 
     schema = export_schema()

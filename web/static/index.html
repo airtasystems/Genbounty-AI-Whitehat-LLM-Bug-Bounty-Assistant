@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Genbounty - AI Whitehat Bug Bounty</title>
+<title>Genbounty - AI Whitehat LLM Bug Bounty Assistant</title>
 <link rel="icon" href="/img/Genbounty.png" sizes="any">
 <link rel="icon" type="image/png" href="/img/Genbounty.png">
 <link rel="apple-touch-icon" href="/img/Genbounty.png">
@@ -21,7 +21,7 @@
       <h2 class="modal-title">Choose where to run tests</h2>
 
       <p class="modal-hint">
-        To skip this dialog next time, add <code>TARGET</code> and <code>COMPONENT</code> to the project root <code>.env</code> file.
+        To skip this dialog next time, add <code>TARGET</code> (URL or <code>host:port</code>) and <code>COMPONENT</code> to the project root <code>.env</code> file.
       </p>
 
       <section class="modal-section">
@@ -175,6 +175,67 @@
     </div>
   </div>
 
+  <!-- Run Cloudflare modal -->
+  <div v-if="showRunCloudflareModal" class="modal-backdrop" @click.self="onCloudflareBackdropClick">
+    <div class="modal modal-wide">
+      <div class="modal-sub">Cloudflare verification</div>
+      <div class="modal-help">
+        <p v-if="runCloudflareTestsStopped" class="modal-note-warn">Tests were stopped because Cloudflare cannot be passed with the current browser settings.</p>
+        <p v-else>Tests paused at a Cloudflare “Verify you are human” screen for <strong>{{ site }}</strong>.</p>
+        <template v-if="cloudflareModalNeedsSettings">
+          <p>Use a <strong>human</strong> fetcher with a <strong>visible</strong> browser (not headless pool mode).</p>
+          <div class="cloudflare-settings-form">
+            <div class="form-row">
+              <label>Fetch method</label>
+              <select v-model="runCloudflareSettings.FETCH_METHOD" class="input">
+                <option value="human">human</option>
+                <option value="auto">auto</option>
+                <option value="pool">pool</option>
+                <option value="cluster">cluster</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" :checked="!runCloudflareSettings.HEADLESS" @change="runCloudflareSettings.HEADLESS = !$event.target.checked">
+                Visible browser (Headless off)
+              </label>
+            </div>
+            <div class="form-row">
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" v-model="runCloudflareSettings.cloudflare_headed">
+                Cloudflare-headed target (human only at run start)
+              </label>
+            </div>
+          </div>
+        </template>
+        <template v-else-if="cloudflareModalTimedOut">
+          <p>Verification was not completed before the wait period ended. Complete the checkbox in the browser, then re-run tests.</p>
+        </template>
+        <template v-else>
+          <p>The runner will try auto-click and wait up to ~2 minutes. Open the <strong>visible browser window</strong>, tick the checkbox, then wait for tests to continue.</p>
+          <p v-if="runBlockedInfo && runBlockedInfo.remaining_sec">Time remaining: ~{{ runBlockedInfo.remaining_sec }}s</p>
+        </template>
+      </div>
+      <div class="modal-actions">
+        <template v-if="cloudflareModalNeedsSettings">
+          <button type="button" class="btn btn-ghost" @click="dismissRunCloudflareModal">Close</button>
+          <button type="button" class="btn btn-primary" @click="applyCloudflareSettingsAndRerun" :disabled="runCloudflareSaving || !site || !component">
+            {{ runCloudflareSaving ? 'Saving…' : 'Apply settings & re-run tests' }}
+          </button>
+        </template>
+        <template v-else-if="cloudflareModalTimedOut">
+          <button type="button" class="btn btn-ghost" @click="dismissRunCloudflareModal">Close</button>
+          <button type="button" class="btn btn-primary" @click="rerunAfterCloudflareTimeout">Re-run tests</button>
+        </template>
+        <template v-else>
+          <button type="button" class="btn btn-ghost" @click="cancelRunTestsFromCloudflare">Stop tests</button>
+          <button type="button" class="btn btn-primary" @click="dismissRunCloudflareModal">OK — I'll complete it in the browser</button>
+        </template>
+      </div>
+      <p v-if="runCloudflareError" class="modal-error">{{ runCloudflareError }}</p>
+    </div>
+  </div>
+
   <!-- Run rate-limit modal -->
   <div v-if="showRunRateLimitModal" class="modal-backdrop" @click.self="dismissRunRateLimitModal">
     <div class="modal modal-wide">
@@ -239,10 +300,10 @@
 
   <!-- Header -->
   <header class="app-header">
-    <a href="/" class="brand" title="Genbounty - AI Whitehat Bug Bounty">
+    <a href="/" class="brand" title="Genbounty - AI Whitehat LLM Bug Bounty Assistant">
       <img src="/img/Genbounty.png" alt="Genbounty" class="brand-logo" width="36" height="36">
       <div>
-        <h1>Genbounty - AI Whitehat Bug Bounty Toolkit</h1>
+        <h1>Genbounty - AI Whitehat LLM Bug Bounty Assistant</h1>
         <span class="brand-tagline">Find, validate, and submit AI vulnerabilities</span>
       </div>
     </a>
@@ -406,7 +467,7 @@
                       style="flex:1;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;color:var(--text);font-size:13px;">
                   </div>
                   <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button type="button" class="btn btn-primary" @click="startLogin" :disabled="!site || !loginUrl || loginRunning">Start Login</button>
+                    <button type="button" class="btn btn-primary" @click="startLogin()" :disabled="!site || !loginUrl || loginRunning">Start Login</button>
                     <button type="button" class="btn btn-ghost" @click="sendLoginEnter" :disabled="!loginJobId || !loginRunning">Press Enter (done)</button>
                     <button type="button" class="btn btn-ghost btn-sm" @click="authLoginChoice = null">Back</button>
                   </div>
@@ -553,6 +614,14 @@
                   :class="runBlockedInfo ? 'btn btn-troubleshoot-alert' : 'btn btn-ghost'"
                   @click="onRunTroubleshoot"
                 >Troubleshoot</button>
+              </div>
+              <div v-if="showRunCloudflareModal && (pendingRunAfterCloudflare || runCloudflareTestsStopped)" class="run-auth-save-bar">
+                <div class="run-auth-save-text">
+                  <strong>Cloudflare verification.</strong>
+                  <span v-if="runCloudflareTestsStopped">Tests stopped — apply browser settings in the dialog, then re-run.</span>
+                  <span v-else>Tick “Verify you are human” in the browser window. Tests resume when the challenge clears.</span>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" @click="showRunCloudflareModal = true">Show instructions</button>
               </div>
               <div v-if="loginRunning && pendingRunAfterLogin" class="run-auth-save-bar">
                 <div class="run-auth-save-text">
@@ -964,6 +1033,7 @@
               </optgroup>
             </select>
           </div>
+
           <button class="btn btn-primary" @click="startSecurityAssess" :disabled="!riskAssessEnabled">Assess</button>
           <div
             v-if="runProgress && riskTabProgressBarVisible"
@@ -1013,9 +1083,40 @@
                 </div>
                 <div v-if="expPreview" class="export-preview">
                   <span v-if="expPreview.batchReports" class="badge badge-neutral">{{ expPreview.batchReports }} report(s)</span>
-                  <span v-else class="badge badge-neutral">{{ expPreview.count }} result(s)</span>
+                  <template v-else>
+                    <span class="badge badge-neutral">{{ expPreview.exportCount }} of {{ expPreview.count }} result(s)</span>
+                    <span v-if="expPreview.exportCount === 0" class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">none match filter</span>
+                  </template>
                   <span v-if="expPreview.playbook" class="badge badge-info">{{ expPreview.playbook }}</span>
                   <span v-if="expPreview.timestamp" class="badge badge-neutral" style="font-family:monospace;font-size:11px;">{{ expPreview.timestamp }}</span>
+                </div>
+              </div>
+
+              <div class="cfg-section">
+                <div class="cfg-section-title">Export settings</div>
+                <p class="cfg-note">Saved to <code>config.yaml</code> for this component. Used for manual submit and auto-submit after assessment (Run Tests → assess after, or Finding Assessment).</p>
+
+                <label class="checkbox-row" style="margin:0 0 12px;">
+                  <input type="checkbox" v-model="exp.autoAfterAssess">
+                  <span>Automatically submit findings after risk assessment</span>
+                </label>
+
+                <div class="cfg-section-title" style="margin-top:8px;font-size:12px;">Risk levels to export</div>
+                <p class="cfg-note">Only findings at the selected severities are submitted. Defaults: critical, high, and medium.</p>
+                <div class="export-risk-levels">
+                  <label v-for="lvl in EXPORT_RISK_LEVELS" :key="lvl.id" class="checkbox-row export-risk-chip">
+                    <input type="checkbox" :checked="exp.riskLevels[lvl.id]" @change="toggleExpRiskLevel(lvl.id)">
+                    <span :class="'risk-label risk-' + lvl.id">{{ lvl.label }}</span>
+                  </label>
+                </div>
+                <p v-if="!expSelectedRiskLevels.length" class="cfg-note" style="color:var(--red);">Select at least one risk level.</p>
+
+                <div style="display:flex;align-items:center;gap:12px;margin-top:12px;">
+                  <button class="btn btn-secondary btn-sm" @click="saveExportSettings" :disabled="!site || !component || expSaving || !expSelectedRiskLevels.length">
+                    {{ expSaving ? 'Saving…' : 'Save export settings' }}
+                  </button>
+                  <span v-if="expSaved" style="font-size:12px;color:var(--green);">Saved</span>
+                  <span v-if="expSaveError" style="font-size:12px;color:var(--red);">{{ expSaveError }}</span>
                 </div>
               </div>
 
@@ -1054,12 +1155,14 @@
                   <label>User ID</label>
                   <input v-model="exp.user_id" placeholder="MongoDB ObjectId">
                 </div>
-                <p class="cfg-note">Each submission is attributed to one Genbounty user. Change this between submissions if needed.</p>
+                <p class="cfg-note">Stored in component <code>config.yaml</code> when you save export settings. Falls back to <code>GENBOUNTY_USER_ID</code> in <code>.env</code> if empty.</p>
               </div>
 
-              <button class="btn btn-primary" @click="startExport" :disabled="!exportEnabled || !expCreds.has_api_key || !expCreds.host || !exp.user_id">
-                Submit to Genbounty
-              </button>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <button class="btn btn-primary" @click="startExport" :disabled="!exportEnabled || !expSelectedRiskLevels.length || !expCreds.has_api_key || !expCreds.host || !exp.user_id">
+                  Submit to Genbounty
+                </button>
+              </div>
             </div>
 
             <!-- Right: result summary -->
@@ -1506,12 +1609,18 @@
 
     <!-- Output panel -->
     <aside class="output-panel">
-      <div class="output-panel-header">• Experiment Output</div>
+      <div class="output-panel-header">
+        • Experiment Output
+        <span v-if="tab === 'run' && activeJobs.run_tests" class="output-panel-header-hint">Resilience attempts in orange</span>
+      </div>
       <div class="output-panel-body">
         <div v-if="panelOutput.length" class="console" ref="panelConsole">
           <div v-for="(line, i) in panelOutput" :key="i" :class="lineClass(line)">{{ line }}</div>
         </div>
-        <div v-else class="output-panel-placeholder">Response output will appear here.</div>
+        <div v-else class="output-panel-placeholder">
+          Response output will appear here.
+          <span class="output-panel-hint">Resilience attempts (rate limits, Cloudflare, retries) show in <span class="line-resilience-inline">orange</span> during runs.</span>
+        </div>
       </div>
     </aside>
   </div>
