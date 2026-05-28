@@ -140,6 +140,18 @@ def _format_api_submission(submission: dict[str, Any]) -> list[str]:
         "  # Dot path into JSON response for assistant text (e.g. response or data.message).",
         f"  api_response_path: {_yaml_scalar(submission.get('api_response_path') or 'response')}",
     ])
+    context_mode = submission.get("api_context_mode")
+    prefix = submission.get("api_messages_prefix")
+    if context_mode or prefix:
+        lines.append("")
+        lines.append("  # Multi-turn API: accumulate prior user/assistant turns into messages (see {{messages}}).")
+        if context_mode:
+            lines.append(f"  api_context_mode: {_yaml_scalar(context_mode)}")
+        if isinstance(prefix, list) and prefix:
+            lines.append("  api_messages_prefix:")
+            prefix_yaml = yaml.dump(prefix, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            for line in prefix_yaml.splitlines():
+                lines.append(f"    {line}" if line.strip() else "")
     return lines
 
 
@@ -304,6 +316,14 @@ def _format_submission_skeleton() -> list[str]:
         "#   api_method: POST",
         "#   api_body:",
         "#     prompt: \"{{prompt}}\"",
+        "#   # Multi-turn API (multi_shot / iterative suites): set api_context_mode and use {{messages}}:",
+        "#   api_context_mode: messages",
+        "#   api_messages_prefix:",
+        "#     - role: system",
+        "#       content: \"You are a helpful assistant.\"",
+        "#   api_body:",
+        "#     model: \"{{model}}\"",
+        "#     messages: \"{{messages}}\"",
         "#   api_response_path: response",
     ]
 

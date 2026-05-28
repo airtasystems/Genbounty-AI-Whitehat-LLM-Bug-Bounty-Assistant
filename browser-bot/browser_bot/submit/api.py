@@ -14,7 +14,7 @@ from browser_bot.config import (
 )
 from browser_bot.sites import get_submission_config
 
-from browser_bot.submit.api_helpers import do_api_request
+from browser_bot.submit.api_helpers import do_api_request, uses_messages_context
 from browser_bot.submit.common import (
     SubmissionProgressTracker,
     _write_run_log,
@@ -30,18 +30,22 @@ async def _api_request_one(
     site: str | None,
     test_case: dict | None = None,
     suite_path=None,
-) -> tuple[str, str | None]:
+    conversation_history: list[tuple[str, str | None]] | None = None,
+) -> tuple[str, str, str | None]:
+    """Returns ``(raw_text, submitted_text, response_text)``."""
+    submitted = append_test_prompt_delimiter(text)
     status, response_text, err = await asyncio.to_thread(
         do_api_request,
         sub,
-        append_test_prompt_delimiter(text),
+        submitted,
         site=site,
         test_case=test_case,
         suite_path=suite_path,
+        conversation_history=conversation_history,
     )
     if err and not response_text:
         print(f"  [api] prompt failed ({status}): {err}")
-    return text, response_text
+    return text, submitted, response_text
 
 
 async def _api_request_batch(
@@ -52,9 +56,18 @@ async def _api_request_batch(
     tracker: SubmissionProgressTracker,
 ) -> list[tuple[str, str | None]]:
     results: list[tuple[str, str | None]] = []
+    history: list[tuple[str, str | None]] = []
+    accumulate = uses_messages_context(sub)
     for text in batch:
-        pair = await _api_request_one(sub, text, site=site)
-        results.append(pair)
+        raw, submitted, response = await _api_request_one(
+            sub,
+            text,
+            site=site,
+            conversation_history=list(history) if accumulate else None,
+        )
+        results.append((raw, response))
+        if accumulate:
+            history.append((submitted, response or ""))
         tracker.record_completed(1)
     return results
 
@@ -95,11 +108,11 @@ async def run_api_submission_single(
 
         async def _one(text: str, tc: dict | None) -> tuple[str, str | None]:
             async with sem:
-                pair = await _api_request_one(
+                raw, _submitted, response = await _api_request_one(
                     sub, text, site=site, test_case=tc, suite_path=suite_path
                 )
                 tracker.record_completed(1)
-                return pair
+                return raw, response
 
         results = list(
             await asyncio.gather(*[_one(text, tc) for text, tc in zip(posts, case_list)])
@@ -113,10 +126,10 @@ async def run_api_submission_single(
                     detail="Pause between sequential API prompts",
                 )
                 await asyncio.sleep(EVASION_REQUEST_DELAY_S)
-            pair = await _api_request_one(
+            raw, _submitted, response = await _api_request_one(
                 sub, text, site=site, test_case=tc, suite_path=suite_path
             )
-            results.append(pair)
+            results.append((raw, response))
             tracker.record_completed(1)
 
     tracker.emit_run_done()

@@ -27,7 +27,7 @@ createApp({
       { id: 'tests', label: 'Test Management' },
       { id: 'run', label: 'Run Tests' },
       { id: 'risk', label: 'Finding Assessment' },
-      { id: 'export', label: 'Submit Findings' },
+      { id: 'export', label: 'Create Bug Bounty Report' },
       { id: 'settings', label: 'Settings' },
     ];
 
@@ -856,6 +856,8 @@ createApp({
         api_url: '', api_method: 'POST', api_response_path: 'response', api_model: '',
         api_body_json: '{\n  "prompt": "{{prompt}}"\n}',
         api_headers_json: '{}',
+        api_context_mode: '',
+        api_messages_prefix_json: '[]',
         upload_url: '', upload_file_field: 'file', upload_response_path: 'document_id',
         multipart_prompt_field: 'prompt', multipart_file_field: 'file',
       },
@@ -986,6 +988,8 @@ createApp({
       compCfg.submission.api_model = s.api_model || '';
       compCfg.submission.api_body_json = JSON.stringify(s.api_body || { prompt: '{{prompt}}' }, null, 2);
       compCfg.submission.api_headers_json = JSON.stringify(s.api_headers || {}, null, 2);
+      compCfg.submission.api_context_mode = s.api_context_mode || '';
+      compCfg.submission.api_messages_prefix_json = JSON.stringify(s.api_messages_prefix || [], null, 2);
       compCfg.submission.upload_url = s.upload_url || '';
       compCfg.submission.upload_file_field = s.upload_file_field || 'file';
       compCfg.submission.upload_response_path = s.upload_response_path || 'document_id';
@@ -1050,6 +1054,13 @@ createApp({
           api_response_path: compCfg.submission.api_response_path || 'response',
         };
         if (compCfg.submission.api_model) out.api_model = compCfg.submission.api_model;
+        if (compCfg.submission.api_context_mode) {
+          out.api_context_mode = compCfg.submission.api_context_mode;
+        }
+        try {
+          const prefix = JSON.parse(compCfg.submission.api_messages_prefix_json || '[]');
+          if (Array.isArray(prefix) && prefix.length) out.api_messages_prefix = prefix;
+        } catch { /* ignore */ }
         return out;
       }
       return {
@@ -1355,7 +1366,7 @@ createApp({
         text: 'Triage findings by severity before submission. Each compliance log is judged by AI (indeterminate → informational → low → medium → high → critical). Assess one log or batch-assess logs from the last hour, 4 hours, or 24 hours. Results are saved as pipeline_report.json beside each attack log.',
       },
       export: {
-        title: 'Submit Findings to Genbounty',
+        title: 'Create Bug Bounty Report',
         text: 'Configure export settings (risk levels, auto-submit after assessment) and save to this component\'s config.yaml. Settings apply when you submit manually or when assessment runs from Run Tests or Finding Assessment. Credentials stay in .env.',
       },
       cache: {

@@ -99,7 +99,7 @@ LLM_API_PRESETS: list[dict[str, Any]] = [
         "id": "test_target",
         "label": "AIRTA test target (local)",
         "description": "Local test-target app — no API key (public) in Step 1.",
-        "url": "http://127.0.0.1:5000/api/chat",
+        "url": "http://127.0.0.1:3000/api/chat",
         "method": "POST",
         "response_path": "response",
         "body": {"prompt": "{{prompt}}"},

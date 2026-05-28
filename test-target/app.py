@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.datastructures import UploadFile
 
 from llm import (
@@ -21,6 +21,7 @@ from llm import (
     gemini_configured,
     gemini_model,
     generate_reply,
+    generate_reply_from_messages,
     guess_mime_type,
 )
 
@@ -46,9 +47,21 @@ class StoredDocument:
 DOCUMENTS: dict[str, StoredDocument] = {}
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(..., min_length=1, max_length=32)
+    content: str = Field(..., min_length=0, max_length=8000)
+
+
 class ChatRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=8000)
+    prompt: str | None = Field(default=None, max_length=8000)
+    messages: list[ChatMessage] | None = None
     document_id: str | None = None
+
+    @model_validator(mode="after")
+    def prompt_or_messages(self) -> "ChatRequest":
+        if not self.messages and not (self.prompt or "").strip():
+            raise ValueError("prompt or messages is required")
+        return self
 
 
 class ChatResponse(BaseModel):
@@ -127,6 +140,7 @@ def health() -> JSONResponse:
                 "multimodal": gemini_configured(),
             },
             "documents_cached": len(DOCUMENTS),
+            "messages_api": True,
         }
     )
 
@@ -160,6 +174,7 @@ async def chat_api(request: Request) -> ChatResponse:
     attachment: MediaAttachment | None = None
     doc_id: str | None = None
     prompt = ""
+    message_dicts: list[dict[str, str]] | None = None
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -177,10 +192,23 @@ async def chat_api(request: Request) -> ChatResponse:
             )
     else:
         try:
-            body = ChatRequest.model_validate(await request.json())
+            raw = await request.json()
         except Exception as exc:
-            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
-        prompt = body.prompt.strip()
+            raise HTTPException(status_code=400, detail="invalid JSON") from exc
+        try:
+            body = ChatRequest.model_validate(raw)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid request: {exc}") from exc
+        if body.messages:
+            message_dicts = [{"role": m.role, "content": m.content} for m in body.messages]
+            prompt = str(body.prompt or "").strip()
+            if not prompt:
+                for item in reversed(message_dicts):
+                    if item["role"].lower() in {"user", "human"}:
+                        prompt = item["content"].strip()
+                        break
+        else:
+            prompt = str(body.prompt or "").strip()
         doc_id = body.document_id
         if doc_id:
             stored = _get_document(doc_id)
@@ -190,11 +218,14 @@ async def chat_api(request: Request) -> ChatResponse:
                 data=stored.data,
             )
 
-    if not prompt and not attachment:
-        raise HTTPException(status_code=400, detail="prompt or file is required")
+    if not prompt and not attachment and not message_dicts:
+        raise HTTPException(status_code=400, detail="prompt, messages, or file is required")
 
     try:
-        result = generate_reply(prompt or "Please analyze the attached file.", attachment)
+        if message_dicts:
+            result = generate_reply_from_messages(message_dicts, attachment)
+        else:
+            result = generate_reply(prompt or "Please analyze the attached file.", attachment)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

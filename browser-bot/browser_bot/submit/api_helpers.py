@@ -13,6 +13,88 @@ import urllib.error
 import urllib.request
 
 
+_MESSAGES_CONTEXT_MODES = frozenset({"messages", "multi_turn", "accumulating"})
+
+
+def uses_messages_context(sub: dict[str, Any]) -> bool:
+    """True when API requests should carry prior turn user/assistant pairs in ``messages``."""
+    mode = str(sub.get("api_context_mode") or "").strip().lower()
+    if mode in _MESSAGES_CONTEXT_MODES:
+        return True
+    if mode in ("off", "none", "single"):
+        return False
+    body = sub.get("api_body") or {}
+    return _contains_messages_placeholder(body)
+
+
+def _contains_messages_placeholder(obj: Any) -> bool:
+    if isinstance(obj, str):
+        return "{{messages}}" in obj
+    if isinstance(obj, dict):
+        return any(_contains_messages_placeholder(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_messages_placeholder(v) for v in obj)
+    return False
+
+
+def build_conversation_messages(
+    sub: dict[str, Any],
+    prompt: str,
+    history: list[tuple[str, str | None]] | None = None,
+) -> list[dict[str, str]]:
+    """Build chat ``messages`` array: optional prefix, prior turns, current user prompt."""
+    prefix = sub.get("api_messages_prefix") or []
+    user_role = str(sub.get("api_user_role") or "user").strip() or "user"
+    assistant_role = str(sub.get("api_assistant_role") or "assistant").strip() or "assistant"
+
+    messages: list[dict[str, str]] = []
+    for item in prefix:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if content is None:
+            continue
+        role = str(item.get("role") or "system").strip() or "system"
+        messages.append({"role": role, "content": str(content)})
+
+    for user_text, assistant_text in history or []:
+        messages.append({"role": user_role, "content": user_text})
+        if assistant_text:
+            messages.append({"role": assistant_role, "content": assistant_text})
+
+    messages.append({"role": user_role, "content": prompt})
+    return messages
+
+
+def _substitute_messages_placeholder(obj: Any, messages: list[dict[str, str]]) -> Any:
+    if isinstance(obj, str) and obj.strip() == "{{messages}}":
+        return messages
+    if isinstance(obj, dict):
+        return {k: _substitute_messages_placeholder(v, messages) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_substitute_messages_placeholder(v, messages) for v in obj]
+    return obj
+
+
+def build_api_request_body(
+    sub: dict[str, Any],
+    prompt: str,
+    *,
+    conversation_history: list[tuple[str, str | None]] | None = None,
+) -> dict[str, Any] | list[Any] | Any:
+    """Render ``api_body`` with prompt/model placeholders and optional multi-turn messages."""
+    model = str(sub.get("api_model") or "").strip()
+    extras = {"model": model} if model else {}
+    body_template = sub.get("api_body") or {"prompt": "{{prompt}}"}
+
+    if uses_messages_context(sub):
+        messages = build_conversation_messages(sub, prompt, conversation_history)
+        with_messages = _substitute_messages_placeholder(body_template, messages)
+        return apply_prompt_template(with_messages, prompt, extra=extras)
+
+    return apply_prompt_template(body_template, prompt, extra=extras)
+
+
 def apply_prompt_template(obj: Any, prompt: str, *, extra: dict[str, str] | None = None) -> Any:
     """Replace ``{{prompt}}`` and optional ``{{key}}`` placeholders in nested structures."""
     extras = extra or {}
@@ -218,6 +300,7 @@ def do_api_request(
     timeout: float = 120.0,
     test_case: dict | None = None,
     suite_path: Path | str | None = None,
+    conversation_history: list[tuple[str, str | None]] | None = None,
 ) -> tuple[int, str | None, str | None]:
     """Send one API submission. Returns ``(status_code, response_text, error)``."""
     transport = (sub.get("transport") or "api").lower()
@@ -239,12 +322,10 @@ def do_api_request(
     headers = {"Accept": "application/json", **dict(sub.get("api_headers") or {})}
     headers.update(auth_headers_for_site(site, url=url))
 
-    model = str(sub.get("api_model") or "").strip()
-    extras = {"model": model} if model else {}
-    body_obj = apply_prompt_template(
-        sub.get("api_body") or {"prompt": "{{prompt}}"},
+    body_obj = build_api_request_body(
+        sub,
         prompt,
-        extra=extras,
+        conversation_history=conversation_history,
     )
     data: bytes | None = None
     if method in {"POST", "PUT", "PATCH"}:

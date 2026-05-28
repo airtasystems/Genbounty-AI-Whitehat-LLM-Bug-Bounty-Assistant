@@ -737,7 +737,7 @@
                       </div>
                       <div v-if="apiDiscover.transport === 'api_document'" class="form-row">
                         <label>Upload URL</label>
-                        <input v-model="apiDiscover.uploadUrl" placeholder="http://127.0.0.1:5000/api/documents/upload" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
+                        <input v-model="apiDiscover.uploadUrl" placeholder="http://127.0.0.1:3000/api/documents/upload" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
                       </div>
                     </div>
                   </details>
@@ -1259,9 +1259,9 @@
           </div>
         </template>
 
-        <!-- Submit Findings -->
+        <!-- Create Bug Bounty Report -->
         <template v-if="tab === 'export'">
-          <h2>Submit Findings to Genbounty</h2>
+          <h2>Create Bug Bounty Report</h2>
           <div v-if="!hintDismissed['export']" class="hint-banner">
             <div><strong>{{ HINTS.export.title }}</strong><p>{{ HINTS.export.text }}</p></div>
             <button class="btn btn-ghost btn-sm hint-dismiss" @click="dismissHint('export')">Got it</button>
@@ -1466,7 +1466,7 @@
                 <template v-if="compCfg.submission.transport === 'api_document'">
                   <div class="form-row">
                     <label>Upload URL</label>
-                    <input v-model="compCfg.submission.upload_url" placeholder="http://localhost:5000/api/documents/upload" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
+                    <input v-model="compCfg.submission.upload_url" placeholder="http://localhost:3000/api/documents/upload" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
                   </div>
                   <div class="form-row">
                     <label>Upload file field</label>
@@ -1478,7 +1478,7 @@
                   </div>
                   <div class="form-row">
                     <label>Chat API URL</label>
-                    <input v-model="compCfg.submission.api_url" placeholder="http://localhost:5000/api/chat" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
+                    <input v-model="compCfg.submission.api_url" placeholder="http://localhost:3000/api/chat" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
                   </div>
                   <div class="form-row">
                     <label>Response path</label>
@@ -1493,7 +1493,7 @@
                 <template v-else-if="compCfg.submission.transport === 'api_multipart'">
                   <div class="form-row">
                     <label>API URL</label>
-                    <input v-model="compCfg.submission.api_url" placeholder="http://localhost:5000/api/chat" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
+                    <input v-model="compCfg.submission.api_url" placeholder="http://localhost:3000/api/chat" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;">
                   </div>
                   <div class="form-row">
                     <label>Prompt field</label>
@@ -1543,6 +1543,18 @@
                   <div class="form-row" style="align-items:flex-start;">
                     <label style="padding-top:6px;">Request body</label>
                     <textarea v-model="compCfg.submission.api_body_json" rows="6" :placeholder="PROMPT_BODY_PLACEHOLDER" style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;"></textarea>
+                  </div>
+                  <div class="form-row">
+                    <label>Multi-turn context</label>
+                    <select v-model="compCfg.submission.api_context_mode" style="max-width:220px;">
+                      <option value="">Off (each turn stateless)</option>
+                      <option value="messages">messages (accumulate turns)</option>
+                    </select>
+                    <span class="cfg-note" style="margin:0;">Use <code v-pre>{{messages}}</code> in request body for multi_shot / iterative suites.</span>
+                  </div>
+                  <div v-if="compCfg.submission.api_context_mode === 'messages'" class="form-row" style="align-items:flex-start;">
+                    <label style="padding-top:6px;">Messages prefix</label>
+                    <textarea v-model="compCfg.submission.api_messages_prefix_json" rows="4" placeholder='[{"role":"system","content":"You are a helpful assistant."}]' style="flex:1;max-width:none;font-family:var(--mono);font-size:12px;"></textarea>
                   </div>
                   <div class="form-row" style="align-items:flex-start;">
                     <label style="padding-top:6px;">Extra headers</label>

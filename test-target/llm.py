@@ -198,7 +198,27 @@ def _text_from_genai_response(response) -> str:
 
 
 def generate_reply(prompt: str, attachment: MediaAttachment | None = None) -> ChatResult:
-    text = (prompt or "").strip()
+    return generate_reply_from_messages(
+        [{"role": "user", "content": prompt}],
+        attachment=attachment,
+    )
+
+
+def generate_reply_from_messages(
+    messages: list[dict[str, str]],
+    attachment: MediaAttachment | None = None,
+) -> ChatResult:
+    if not messages:
+        raise ValueError("messages is required")
+
+    user_roles = {"user", "human"}
+    last_user = ""
+    for item in reversed(messages):
+        role = str(item.get("role") or "").strip().lower()
+        if role in user_roles:
+            last_user = str(item.get("content") or "").strip()
+            break
+    text = last_user
     if not text and not attachment:
         raise ValueError("prompt or attachment is required")
     if not text:
@@ -209,18 +229,41 @@ def generate_reply(prompt: str, attachment: MediaAttachment | None = None) -> Ch
     if client:
         uploaded_for_cleanup = None
         try:
-            contents: list = [text]
+            from google.genai import types
+
+            system_parts = [
+                str(item.get("content") or "")
+                for item in messages
+                if str(item.get("role") or "").strip().lower() == "system" and item.get("content")
+            ]
+            system_instruction = SYSTEM_PROMPT
+            if system_parts:
+                system_instruction = SYSTEM_PROMPT + "\n\n" + "\n".join(system_parts)
+
+            contents: list = []
+            for item in messages:
+                role = str(item.get("role") or "user").strip().lower()
+                content = str(item.get("content") or "")
+                if role == "system" or not content:
+                    continue
+                gemini_role = "model" if role in {"assistant", "model"} else "user"
+                contents.append(types.Content(role=gemini_role, parts=[types.Part(text=content)]))
+
             if attachment:
                 media_part, uploaded_for_cleanup = _gemini_media_part(client, attachment)
-                contents = [media_part, text]
+                if contents and contents[-1].role == "user":
+                    contents[-1].parts = [media_part, *contents[-1].parts]
+                else:
+                    contents.append(types.Content(role="user", parts=[media_part, types.Part(text=text)]))
 
-            from google.genai import types
+            if not contents:
+                contents = [text]
 
             response = _generate_with_retry(
                 client,
                 model=model,
                 contents=contents,
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
             )
             out = _text_from_genai_response(response)
             return ChatResult(
@@ -245,9 +288,14 @@ def generate_reply(prompt: str, attachment: MediaAttachment | None = None) -> Ch
                 except Exception:
                     pass
 
+    mock_prompt = "\n\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}"
+        for item in messages
+        if item.get("content")
+    )
     return ChatResult(
         prompt=text,
-        response=mock_reply(text, attachment),
+        response=mock_reply(mock_prompt or text, attachment),
         model="mock",
         source="mock",
         attachment=attachment,

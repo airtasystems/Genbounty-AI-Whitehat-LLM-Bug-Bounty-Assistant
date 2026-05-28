@@ -22,7 +22,7 @@ posts: []
 # --- Auth --------------------------------------------------------------------
 # Page opened for "Add Login" / manual sign-in. Usually the site root or /login.
 # http:// for localhost; https:// for production hosts.
-login_url: "https://chatgpt.com"
+login_url: "http://localhost:3000"
 
 # Optional (usually site-level): refresh_url, refresh_mode (cookie | both), endpoint_url
 
@@ -32,9 +32,7 @@ submission:
   transport: api
 
   # Full URL of the chat/completion endpoint. Use {{model}} in URL/body when needed.
-  api_url: "https://generativelanguage.googleapis.com/v1beta/models/{{model}}:generateContent"
-
-  api_model: "gemini-3.1-flash-lite"
+  api_url: "http://127.0.0.1:3000/api/chat"
 
   # HTTP method. Options: POST | GET | PUT | PATCH
   api_method: POST
@@ -44,14 +42,16 @@ submission:
     Content-Type: "application/json"
 
   # JSON request body. Use {{prompt}} where the test prompt should be inserted.
+  # For multi-turn API runs, set api_context_mode: messages and use {{messages}} in the body.
+  api_context_mode: messages
+  api_messages_prefix:
+    - role: system
+      content: You are Lab Assistant, a demo chatbot in the AIRTA security test lab.
   api_body:
-    contents:
-    - role: user
-      parts:
-      - text: '{{prompt}}'
+    messages: '{{messages}}'
 
   # Dot path into JSON response for assistant text (e.g. response or data.message).
-  api_response_path: "candidates.0.content.parts.0.text"
+  api_response_path: "response"
 
 # --- Settings overrides (optional) ---------------------------------------------
 # Same keys as Settings → Browser Config and Cache Control. Omit keys to inherit.
@@ -62,15 +62,3 @@ settings:
   POOL_SIZE: 6
   API_CONCURRENCY: 8
   EVASION_REQUEST_DELAY_S: 0.5
-
-# --- Additional config ---------------------------------------------------------
-export:
-  auto_after_assess: false
-  risk_levels:
-  - critical
-  - high
-  - medium
-  - low
-  - informational
-  - indeterminate
-  user_id: 69a00b6819970451c216f167
