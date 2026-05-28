@@ -10,6 +10,7 @@ from browser_bot.config import (
     EVASION_REQUEST_DELAY_S,
     get_posts_batches,
     get_posts_strings,
+    get_suite_multi_test_cases,
     get_suite_test_cases,
 )
 from browser_bot.sites import get_submission_config
@@ -28,6 +29,7 @@ async def _api_request_one(
     text: str,
     *,
     site: str | None,
+    component: str | None = None,
     test_case: dict | None = None,
     suite_path=None,
     conversation_history: list[tuple[str, str | None]] | None = None,
@@ -39,6 +41,7 @@ async def _api_request_one(
         sub,
         submitted,
         site=site,
+        component=component,
         test_case=test_case,
         suite_path=suite_path,
         conversation_history=conversation_history,
@@ -53,6 +56,7 @@ async def _api_request_batch(
     batch: list[str],
     *,
     site: str | None,
+    component: str | None = None,
     tracker: SubmissionProgressTracker,
 ) -> list[tuple[str, str | None]]:
     results: list[tuple[str, str | None]] = []
@@ -63,6 +67,7 @@ async def _api_request_batch(
             sub,
             text,
             site=site,
+            component=component,
             conversation_history=list(history) if accumulate else None,
         )
         results.append((raw, response))
@@ -109,7 +114,7 @@ async def run_api_submission_single(
         async def _one(text: str, tc: dict | None) -> tuple[str, str | None]:
             async with sem:
                 raw, _submitted, response = await _api_request_one(
-                    sub, text, site=site, test_case=tc, suite_path=suite_path
+                    sub, text, site=site, component=component, test_case=tc, suite_path=suite_path
                 )
                 tracker.record_completed(1)
                 return raw, response
@@ -127,14 +132,20 @@ async def run_api_submission_single(
                 )
                 await asyncio.sleep(EVASION_REQUEST_DELAY_S)
             raw, _submitted, response = await _api_request_one(
-                sub, text, site=site, test_case=tc, suite_path=suite_path
+                sub, text, site=site, component=component, test_case=tc, suite_path=suite_path
             )
             results.append((raw, response))
             tracker.record_completed(1)
 
     tracker.emit_run_done()
     log_path = (
-        _write_run_log(site, component, results, test_cases=test_cases or None)
+        _write_run_log(
+            site,
+            component,
+            results,
+            test_cases=test_cases or None,
+            suite_path=suite_path,
+        )
         if results
         else None
     )
@@ -172,7 +183,7 @@ async def run_api_submission_multi(
 
         async def _one_batch(batch: list[str]) -> list[tuple[str, str | None]]:
             async with sem:
-                return await _api_request_batch(sub, batch, site=site, tracker=tracker)
+                return await _api_request_batch(sub, batch, site=site, component=component, tracker=tracker)
 
         batch_results = await asyncio.gather(*[_one_batch(batch) for batch in batches])
         for batch in batch_results:
@@ -186,12 +197,20 @@ async def run_api_submission_multi(
                     detail="Pause between sequential API batches",
                 )
                 await asyncio.sleep(EVASION_REQUEST_DELAY_S)
-            batch_results = await _api_request_batch(sub, batch, site=site, tracker=tracker)
+            batch_results = await _api_request_batch(sub, batch, site=site, component=component, tracker=tracker)
             all_results.extend(batch_results)
 
     tracker.emit_run_done()
+    multi_test_cases = get_suite_multi_test_cases(suite_path) if suite_path else []
     log_path = (
-        _write_run_log(site, component, all_results, multi_batches=batches)
+        _write_run_log(
+            site,
+            component,
+            all_results,
+            multi_batches=batches,
+            multi_test_cases=multi_test_cases or None,
+            suite_path=suite_path,
+        )
         if all_results
         else None
     )

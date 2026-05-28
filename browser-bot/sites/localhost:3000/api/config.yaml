@@ -22,51 +22,31 @@ posts: []
 # --- Auth --------------------------------------------------------------------
 # Page opened for "Add Login" / manual sign-in. Usually the site root or /login.
 # http:// for localhost; https:// for production hosts.
-login_url: "https://chatgpt.com"
+login_url: "http://localhost:3000"
 
 # Optional (usually site-level): refresh_url, refresh_mode (cookie | both), endpoint_url
 
-# --- UI submission (browser automation - Run Tests / Sample Request) ----------
+# --- API submission (direct HTTP - no browser selectors required) -------------
 submission:
   # Transport: ui (browser automation) | api (HTTP endpoint)
-  transport: ui
+  transport: api
 
-  # Page URL where the chat / prompt UI lives (loaded before each test).
-  start_url: "https://chatgpt.com/"
+  # Full URL of the chat/completion endpoint. Use {{model}} in URL/body when needed.
+  api_url: "http://127.0.0.1:3000/api/chat"
 
-  # Fields to fill in order before submit. One object per input.
-  inputs:
-    - selector: "#prompt-textarea"
-      # Input type - affects how Playwright fills the field:
-      #   text | textarea | contenteditable | password | email | search
-      #   select | combobox | checkbox | radio | file (use path_from: payload for multimodal uploads)
-      type: contenteditable
-      # value: optional fixed string (usually leave unset; tests supply the prompt)
+  # HTTP method. Options: POST | GET | PUT | PATCH
+  api_method: POST
 
-  # Element that sends the prompt (button, etc.).
-  submit_selector: "#composer-submit-button"
+  # Optional request headers (merged with saved auth headers).
+  api_headers:
+    Content-Type: "application/json"
 
-  # Container(s) for assistant output - roots the response capture.
-  # Often a message list, bubble, or [data-testid="assistant-message"].
-  response_selector: "div[data-message-author-role=\"assistant\"]"
+  # JSON request body. Use {{prompt}} where the test prompt should be inserted.
+  api_body:
+    prompt: '{{prompt}}'
 
-  # Optional: descendant under response_selector - last visible match wins.
-  # Use when the root holds multiple messages and you want the latest bubble.
-  # response_within_selector: div.message-body
-
-  # Optional: narrower node for inner_text only (e.g. "> p" inside the bubble).
-  # response_text_within_selector: "> p"
-
-  # How to submit after filling inputs.
-  # Options: click | enter
-  submit_via: click
-
-  # Max time to wait for a new response after submit, in milliseconds (min ~500).
-  response_wait_ms: 8000
-
-  # Optional multi-turn UI mode (for tree-of-thoughts / batched suites):
-  # mode: single | multi     - single = one prompt per case (default)
-  # batch_size: 3           - if >1 without mode, implies multi
+  # Dot path into JSON response for assistant text (e.g. response or data.message).
+  api_response_path: "response"
 
 # --- Settings overrides (optional) ---------------------------------------------
 # Same keys as Settings → Browser Config and Cache Control. Omit keys to inherit.

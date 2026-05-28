@@ -14,6 +14,8 @@
 # Page opened for "Add Login" / manual sign-in. Usually the site root or /login.
 # http:// for localhost; https:// for production hosts.
 # Shared by all components on this site unless a component sets its own login_url.
+# Target auth (API keys / UI sessions) is stored per component at sites/{site}/{component}/auth.json
+# (legacy site-level sites/{site}/auth.json is used as fallback when component auth is missing).
 login_url: "http://localhost:3000"
 
 # --- Token refresh (optional) ------------------------------------------------

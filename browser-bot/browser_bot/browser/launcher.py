@@ -107,11 +107,11 @@ def _load_normalized_auth_config(path: Path) -> dict | None:
     return _normalize_auth_config(raw)
 
 
-def load_auth_config_for_site(site: str) -> dict | None:
-    """Load normalized auth config for a site domain, or None if missing/empty."""
+def load_auth_config_for_site(site: str, component: str | None = None) -> dict | None:
+    """Load normalized auth config for a site/component, or None if missing/empty."""
     from browser_bot.sites import get_storage_state_path
 
-    path = get_storage_state_path(site)
+    path = get_storage_state_path(site, component)
     if not path or not path.exists():
         return None
     config = _load_normalized_auth_config(path)
@@ -216,9 +216,15 @@ async def seed_auth_local_storage(context, config: dict, page=None) -> None:
             await page.close()
 
 
-async def apply_site_auth_to_context(context, site: str, *, page=None) -> bool:
+async def apply_site_auth_to_context(
+    context,
+    site: str,
+    *,
+    component: str | None = None,
+    page=None,
+) -> bool:
     """Merge auth.json into any context. Returns True when auth was applied."""
-    config = load_auth_config_for_site(site)
+    config = load_auth_config_for_site(site, component)
     if not config:
         return False
     await apply_auth_config_to_context(context, config)
@@ -318,7 +324,12 @@ def _clear_stale_profile_locks(user_data_dir: str) -> None:
 
 
 async def launch_persistent_context(
-    playwright, user_data_dir: str, *, headless: bool = False, site: str | None = None
+    playwright,
+    user_data_dir: str,
+    *,
+    headless: bool = False,
+    site: str | None = None,
+    component: str | None = None,
 ) -> tuple[None, "BrowserContext"]:
     """
     Launch Chrome with persistent profile for login. Google trusts real profiles more.
@@ -375,17 +386,21 @@ async def launch_persistent_context(
     await stealth.apply_stealth_async(context)
 
     if site:
-        await apply_site_auth_to_context(context, site)
+        await apply_site_auth_to_context(context, site, component=component)
 
     return None, context
 
 
 async def launch_persistent_context_for_login(
-    playwright, user_data_dir: str, *, site: str | None = None
+    playwright,
+    user_data_dir: str,
+    *,
+    site: str | None = None,
+    component: str | None = None,
 ) -> tuple[None, "BrowserContext"]:
     """Backward-compatible login wrapper using a visible persistent context."""
     return await launch_persistent_context(
-        playwright, user_data_dir, headless=False, site=site
+        playwright, user_data_dir, headless=False, site=site, component=component
     )
 
 

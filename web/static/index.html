@@ -425,7 +425,7 @@
         <option value="">Select site...</option>
         <option v-for="s in sites" :key="s" :value="s">{{ s }}</option>
       </select>
-      <select v-model="component" @change="onComponentChange" :disabled="!site" class="border-button">
+      <select v-model="component" :disabled="!site" class="border-button">
         <option value="">Select component...</option>
         <option v-for="c in components" :key="c" :value="c">{{ c }}</option>
       </select>
@@ -551,9 +551,13 @@
                 </span>
               </div>
               <div class="setup-step-body">
+                <p v-if="authScope === 'site' && authConfigured" class="cfg-note" style="margin:0 0 12px 0;">
+                  Using legacy site-level <code>auth.json</code> (fallback). Save access again for this component to store
+                  <code>sites/{{ site }}/{{ component }}/auth.json</code> separately.
+                </p>
                 <template v-if="authConfigured && authMode === 'none' && !pendingRunAfterLogin">
                   <p>
-                    This target is set up for <strong>public access</strong> - no login session is stored.
+                    This component is set up for <strong>public access</strong> - no login session is stored.
                     Browser tests will run without saved cookies.
                   </p>
                   <button type="button" class="btn btn-ghost btn-sm" @click="resetAuthSetup">Change access type</button>
@@ -592,6 +596,22 @@
                   <p v-if="authApiKeyError" style="color:var(--red);font-size:13px;margin-top:6px;">{{ authApiKeyError }}</p>
                 </template>
 
+                <template v-else-if="authConfigured && authMode === 'session' && !pendingRunAfterLogin">
+                  <p>
+                    UI login session is saved for this component. Browser tests reuse saved cookies and storage.
+                    <span v-if="loginUrl"> Login page: <code>{{ loginUrl }}</code></span>
+                  </p>
+                  <div class="form-row" style="margin-top:8px;">
+                    <label>Login URL</label>
+                    <input v-model="loginUrl" placeholder="https://example.com/login"
+                      style="flex:1;max-width:none;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;color:var(--text);font-size:13px;">
+                  </div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" class="btn btn-primary btn-sm" @click="startLogin()" :disabled="!site || !loginUrl || loginRunning">Re-login</button>
+                    <button type="button" class="btn btn-ghost btn-sm" @click="resetAuthSetup">Change access type</button>
+                  </div>
+                </template>
+
                 <template v-else-if="authLoginChoice === null && !pendingRunAfterLogin">
                   <p>How does this target authenticate?</p>
                   <div class="auth-choice-btns">
@@ -605,8 +625,9 @@
 
                 <template v-else-if="authLoginChoice === 'api_key' && !authConfigured">
                   <p>
-                    Save an API key for this target. Browser tests run without a UI login (same as public access).
-                    API endpoint discovery and API transport merge the key from <code>auth.json</code> (not config.yaml).
+                    Save an API key for this component. Browser tests run without a UI login (same as public access).
+                    API endpoint discovery and API transport merge the key from this component's
+                    <code>sites/{{ site }}/{{ component }}/auth.json</code> (not config.yaml).
                   </p>
                   <div class="form-row">
                     <label>API key</label>
@@ -669,11 +690,14 @@
                 </div>
 
                 <template v-if="discoverTransport === 'browser'">
-                  <p>Opens a browser with your auth loaded and records UI selectors for input, submit, and response elements. Discovery scans for file upload support and writes multimodal <code>inputs</code> (file + <code>path_from: payload</code>) into <code>config.yaml</code> when found. Use <strong>Start Discovery</strong> for the in-page guide, <strong>Troubleshoot</strong> for automated detection, or <strong>Manual entry</strong> to edit <code>config.yaml</code> in Settings.</p>
+                  <p>Opens a browser with your auth loaded and records UI selectors for input, submit, and response elements. Both <strong>Start Discovery</strong> and <strong>Troubleshoot</strong> scan for dropdown menus and file upload support; when uploads need a model/mode menu first, the prerequisite dropdown is saved before the upload control. Multimodal <code>inputs</code> (dropdown, file + <code>path_from: payload</code>, text) are written into <code>config.yaml</code> when found. Use Start Discovery for the in-page guide, Troubleshoot for automated AI detection, or <strong>Manual entry</strong> to edit <code>config.yaml</code> in Settings. For Troubleshoot, open any model/mode menu before pressing Enter so hidden upload controls appear in the captured HTML.</p>
                   <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <button class="btn btn-primary" @click="startManualDiscover" :disabled="!site || !component || manualDiscoverRunning">Start Discovery</button>
                     <button class="btn btn-ghost" @click="startDiscover" :disabled="!site || !component || discoverRunning">Troubleshoot</button>
                     <button class="btn btn-ghost" @click="sendEnter" :disabled="!discoverJobId">Press Enter</button>
+                    <button type="button" class="btn btn-ghost" @click="openManualComponentSettings" :disabled="!site || !component" title="Edit config.yaml selectors directly in Settings">
+                      Manual entry
+                    </button>
                   </div>
                 </template>
 
@@ -1217,9 +1241,9 @@
           </div>
         </template>
 
-        <!-- Finding Assessment -->
+        <!-- Risk assessment -->
         <template v-if="tab === 'risk'">
-          <h2>Finding Assessment</h2>
+          <h2>Risk assessment</h2>
           <div v-if="!hintDismissed['risk']" class="hint-banner">
             <div><strong>{{ HINTS.risk.title }}</strong><p>{{ HINTS.risk.text }}</p></div>
             <button class="btn btn-ghost btn-sm hint-dismiss" @click="dismissHint('risk')">Got it</button>
@@ -1304,7 +1328,7 @@
 
               <div class="cfg-section">
                 <div class="cfg-section-title">Export settings</div>
-                <p class="cfg-note">Saved to <code>config.yaml</code> for this component. Used for manual submit and auto-submit after assessment (Run Tests → assess after, or Finding Assessment).</p>
+                <p class="cfg-note">Saved to <code>config.yaml</code> for this component. Used for manual submit and auto-submit after assessment (Run Tests → assess after, or Risk assessment).</p>
 
                 <label class="checkbox-row" style="margin:0 0 12px;">
                   <input type="checkbox" v-model="exp.autoAfterAssess">
@@ -1320,6 +1344,13 @@
                   </label>
                 </div>
                 <p v-if="!expSelectedRiskLevels.length" class="cfg-note" style="color:var(--red);">Select at least one risk level.</p>
+                <p
+                  v-else-if="expPreview && expPreview.count > 0 && expPreview.exportCount === 0"
+                  class="cfg-note"
+                  style="color:var(--yellow);margin-top:8px;"
+                >
+                  {{ exportSubmitBlockedMessage }}
+                </p>
 
                 <div style="display:flex;align-items:center;gap:12px;margin-top:12px;">
                   <button class="btn btn-secondary btn-sm" @click="saveExportSettings" :disabled="!site || !component || expSaving || !expSelectedRiskLevels.length">
@@ -1368,10 +1399,19 @@
                 <p class="cfg-note">Stored in component <code>config.yaml</code> when you save export settings. Falls back to <code>GENBOUNTY_USER_ID</code> in <code>.env</code> if empty.</p>
               </div>
 
-              <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                <button class="btn btn-primary" @click="startExport" :disabled="!exportEnabled || !expSelectedRiskLevels.length || !expCreds.has_api_key || !expCreds.host || !exp.user_id">
-                  Submit to Genbounty
-                </button>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                  <button class="btn btn-primary" @click="startExport" :disabled="!exportEnabled || !expSelectedRiskLevels.length || !expCreds.has_api_key || !expCreds.host || !exp.user_id">
+                    Submit to Genbounty
+                  </button>
+                </div>
+                <p
+                  v-if="exportSubmitBlockedMessage && !(expPreview && expPreview.count > 0 && expPreview.exportCount === 0)"
+                  class="cfg-note"
+                  style="color:var(--yellow);margin:0;"
+                >
+                  {{ exportSubmitBlockedMessage }}
+                </p>
               </div>
             </div>
 

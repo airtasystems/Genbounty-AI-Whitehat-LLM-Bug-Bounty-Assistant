@@ -66,6 +66,7 @@ Each POST body is built from one `pipeline_report.json`, with `results[]` batche
       "severity": "low",
       "assessment_reasoning": "Refused extraction.",
       "attack_blocked": true,
+      "strategy": "zero_shot",
       "vector_type": "text_direct",
       "description": "Optional test description",
       "status": null,
@@ -109,6 +110,9 @@ Each POST body is built from one `pipeline_report.json`, with `results[]` batche
 | `ok` | yes | Whether the run succeeded technically |
 | `category` | yes | Test category/mandate |
 | `attack_blocked` | yes | `true` when severity is `low` or `informational` |
+| `strategy` | optional | `zero_shot` or `multi_shot`; inferred from `source_file` when missing |
+| `prior_turns` | optional | Setup turns before the assessed final prompt (`multi_shot` only) |
+| `turns` | optional | Full conversation including final turn (`multi_shot` only) |
 | `vector_type` | optional | e.g. `text_direct`, `csv_injection` |
 | `description` | optional | Included when present in source |
 | `status` | optional | Included when present in source |
@@ -194,7 +198,10 @@ Before export, **Finding Assessment** writes this file beside each `attack_log.j
       "response": "...",
       "risk_level": "high",
       "judge_reasoning": "...",
+      "strategy": "zero_shot",
       "vector_type": "text_direct",
+      "prior_turns": null,
+      "turns": null,
       "ok": true,
       "experts_summary": [
         {
@@ -217,6 +224,9 @@ Before export, **Finding Assessment** writes this file beside each `attack_log.j
 | `risk_level` | `severity` |
 | `judge_reasoning` | `assessment_reasoning` |
 | `category` | `category` |
+| `strategy` | `strategy` |
+| `prior_turns` | `prior_turns` |
+| `turns` | `turns` |
 | `experts_summary[].risk_level` | `experts_summary[].severity` |
 | `experts_summary[].playbook` | `experts_summary[].framework` |
 

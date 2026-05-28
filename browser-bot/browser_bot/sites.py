@@ -14,8 +14,10 @@ def _domain_to_site_dir(domain: str) -> Path:
     return SITES_DIR / domain
 
 
-def get_login_profile_path(domain: str) -> Path:
+def get_login_profile_path(domain: str, component: str | None = None) -> Path:
     """Path to persistent profile for login (Google trusts real profiles more)."""
+    if component:
+        return get_component_path(domain, component) / ".login_profile"
     return _domain_to_site_dir(domain) / ".login_profile"
 
 
@@ -37,19 +39,16 @@ def get_domain_from_url(url: str) -> str:
     return parsed.netloc or parsed.path.split("/")[0] or ""
 
 
-def get_storage_state_path(domain: str) -> Path | None:
-    """Get path to auth config for domain. Prefers auth.json, falls back to storage_state.json."""
-    site_dir = _domain_to_site_dir(domain)
-    auth_path = site_dir / AUTH_FILE
-    storage_path = site_dir / STORAGE_STATE_FILE
-    if auth_path.exists():
-        return auth_path
-    return storage_path if storage_path.exists() else None
+def get_storage_state_path(domain: str, component: str | None = None) -> Path | None:
+    """Get path to auth config for domain/component. Prefers auth.json, falls back to storage_state.json."""
+    from browser_bot.auth_state import resolve_auth_read_path
+
+    return resolve_auth_read_path(domain, component)
 
 
-def get_storage_state_path_for_url(url: str) -> Path | None:
+def get_storage_state_path_for_url(url: str, component: str | None = None) -> Path | None:
     """Get storage state path for a URL's domain."""
-    return get_storage_state_path(get_domain_from_url(url))
+    return get_storage_state_path(get_domain_from_url(url), component)
 
 
 def ensure_site_dir(domain: str) -> Path:
@@ -90,8 +89,10 @@ def remove_site(domain: str) -> bool:
 
 
 # --- Site config (sites/{domain}/config.yaml) ---
-# Shared auth settings: login_url, refresh_url, refresh_mode, refresh_cookies.
+# Shared settings: login_url, refresh_url, refresh_mode, refresh_cookies.
 # Components inherit these; component config overrides site config.
+# Target auth (API keys / UI sessions) lives at sites/{domain}/{component}/auth.json
+# with legacy fallback to sites/{domain}/auth.json.
 
 SITE_CONFIG_FILE = "config.yaml"
 

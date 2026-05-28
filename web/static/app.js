@@ -26,7 +26,7 @@ createApp({
       { id: 'payloads', label: 'Payloads' },
       { id: 'tests', label: 'Test Management' },
       { id: 'run', label: 'Run Tests' },
-      { id: 'risk', label: 'Finding Assessment' },
+      { id: 'risk', label: 'Risk assessment' },
       { id: 'export', label: 'Create Bug Bounty Report' },
       { id: 'settings', label: 'Settings' },
     ];
@@ -641,6 +641,22 @@ createApp({
       return (rows || []).filter(r => allowed.has(normalizeExportRiskLevel(r))).length;
     }
 
+    function summarizeReportSeverities(rows) {
+      const counts = {};
+      for (const row of rows || []) {
+        const level = normalizeExportRiskLevel(row);
+        counts[level] = (counts[level] || 0) + 1;
+      }
+      return counts;
+    }
+
+    function formatSeveritySummary(counts) {
+      return EXPORT_RISK_LEVELS
+        .filter(l => counts[l.id])
+        .map(l => `${counts[l.id]} ${l.label}`)
+        .join(', ');
+    }
+
     function toggleExpRiskLevel(id) {
       exp.riskLevels[id] = !exp.riskLevels[id];
     }
@@ -651,6 +667,43 @@ createApp({
       if (windowId) return (exportWindowCounts.value[windowId] || 0) > 0;
       if (expPreview.value && expPreview.value.exportCount === 0) return false;
       return true;
+    });
+
+    const exportSubmitBlockedMessage = computed(() => {
+      if (!exp.report) {
+        return 'Select a pipeline report before submitting.';
+      }
+      if (!expSelectedRiskLevels.value.length) {
+        return 'Select at least one risk level under Export settings.';
+      }
+      const windowId = riskWindowIdFromValue(exp.report);
+      if (windowId) {
+        if (!(exportWindowCounts.value[windowId] || 0)) {
+          return 'No assessed reports in this time window. Run tests and risk assessment first.';
+        }
+        return null;
+      }
+      const preview = expPreview.value;
+      if (preview && preview.count > 0 && preview.exportCount === 0) {
+        const inReport = preview.severitySummary
+          ? ` (${preview.severitySummary})`
+          : '';
+        const selected = EXPORT_RISK_LEVELS
+          .filter(l => exp.riskLevels[l.id])
+          .map(l => l.label)
+          .join(', ');
+        return (
+          `No results match your export filter. This report has ${preview.count} assessed result(s)${inReport}, `
+          + `but none at ${selected}. Enable the matching risk level(s) above — for example Low when attacks were blocked.`
+        );
+      }
+      if (!expCreds.has_api_key || !expCreds.host) {
+        return 'Configure Genbounty host and API key before submitting.';
+      }
+      if (!(exp.user_id || '').trim()) {
+        return 'Enter a User ID (saved with export settings).';
+      }
+      return null;
     });
     const expResult = ref(null);
     const expPreview = ref(null);
@@ -779,9 +832,11 @@ createApp({
         const data = await api(`/api/log?path=${encodeURIComponent(path)}`);
         const rows = data.adversarial_results || [];
         const exportCount = countExportableResults(rows);
+        const severityCounts = summarizeReportSeverities(rows);
         expPreview.value = {
           count: rows.length,
           exportCount,
+          severitySummary: formatSeveritySummary(severityCounts),
           playbook: data.playbook || '',
           timestamp: data.timestamp || '',
           riskLevels: levels,
@@ -998,6 +1053,8 @@ createApp({
       if (['api', 'api_document', 'api_multipart'].includes(compCfg.submission.transport)) {
         discoverTransport.value = 'api';
         syncApiDiscoverFromCompCfg();
+      } else {
+        discoverTransport.value = 'browser';
       }
     }
 
@@ -1334,6 +1391,7 @@ createApp({
       site.value = s;
       components.value = await api(`/api/sites/${encodeURIComponent(s)}/components`);
       component.value = c;
+      await loadDiscoverContext();
       await loadContext();
       showModal.value = false;
       await checkSetupAndNavigate();
@@ -1362,12 +1420,12 @@ createApp({
         text: 'Open a generated test file by strategy, then edit categories and prompts in place - add rows, refine wording, or remove items. Save writes changes back to the component tests/ directory for the next hunt.',
       },
       risk: {
-        title: 'Finding Assessment',
+        title: 'Risk assessment',
         text: 'Triage findings by severity before submission. Each compliance log is judged by AI (indeterminate → informational → low → medium → high → critical). Assess one log or batch-assess logs from the last hour, 4 hours, or 24 hours. Results are saved as pipeline_report.json beside each attack log.',
       },
       export: {
         title: 'Create Bug Bounty Report',
-        text: 'Configure export settings (risk levels, auto-submit after assessment) and save to this component\'s config.yaml. Settings apply when you submit manually or when assessment runs from Run Tests or Finding Assessment. Credentials stay in .env.',
+        text: 'Configure export settings (risk levels, auto-submit after assessment) and save to this component\'s config.yaml. Settings apply when you submit manually or when assessment runs from Run Tests or Risk assessment. Credentials stay in .env.',
       },
       cache: {
         title: 'Clear Cache',
@@ -1694,6 +1752,7 @@ createApp({
       site.value = target;
       components.value = comps;
       component.value = comp;
+      await loadDiscoverContext();
       await loadContext();
       await checkSetupAndNavigate();
       return true;
@@ -1701,20 +1760,29 @@ createApp({
 
     async function onSiteChange() {
       component.value = '';
-      loginUrl.value = '';
-      authConfigured.value = false;
+      discoverJobId.value = null;
+      manualDiscoverJobId.value = null;
+      apiDiscoverJobId.value = null;
+      discoverTransport.value = 'browser';
+      resetDiscoverAuthUi();
       if (site.value) {
         components.value = await api(`/api/sites/${encodeURIComponent(site.value)}/components`);
         if (components.value.length === 1) {
           component.value = components.value[0];
-          await loadAuthStatus();
-          await loadContext();
-          await checkSetupAndNavigate();
         } else {
-          await loadAuthStatus();
+          authConfigured.value = false;
+          authMode.value = null;
+          authLoginChoice.value = null;
+          authHasApiKey.value = false;
+          authScope.value = 'none';
         }
       } else {
         components.value = [];
+        authConfigured.value = false;
+        authMode.value = null;
+        authLoginChoice.value = null;
+        authHasApiKey.value = false;
+        authScope.value = 'none';
       }
     }
 
@@ -2086,6 +2154,7 @@ createApp({
     const authApiKeyInput = ref('');
     const authApiKeyError = ref('');
     const authHasApiKey = ref(false);
+    const authScope = ref('none');
     const authApiKeyHeader = ref('Authorization');
     const authApiKeyQueryParam = ref('');
     const authUseBearer = ref(false);
@@ -2103,22 +2172,46 @@ createApp({
       return authMode.value === 'api_key' && authHasApiKey.value;
     });
 
-    async function loadAuthStatus() {
-      if (!site.value) {
+    function defaultLoginUrlForSite(siteId) {
+      if (!siteId) return '';
+      const isLocal = siteId.startsWith('localhost') || siteId.startsWith('127.') || siteId.startsWith('0.0.0.0');
+      return `${isLocal ? 'http' : 'https'}://${siteId}`;
+    }
+
+    function authApiPath(suffix) {
+      if (!site.value || !component.value) return null;
+      const s = encodeURIComponent(site.value);
+      const c = encodeURIComponent(component.value);
+      return `/api/sites/${s}/${c}${suffix}`;
+    }
+
+    function resetDiscoverAuthUi() {
+      authApiKeyError.value = '';
+      authApiKeyInput.value = '';
+      loginJobId.value = null;
+      authPublicSaving.value = false;
+      authApiKeySaving.value = false;
+    }
+
+    async function loadAuthStatus(loginUrlOverride = '') {
+      if (!site.value || !component.value) {
         authConfigured.value = false;
         authMode.value = null;
         authLoginChoice.value = null;
         authHasApiKey.value = false;
+        authScope.value = 'none';
         authApiKeyInput.value = '';
         loginUrl.value = '';
         return;
       }
-      const _isLocal = site.value.startsWith('localhost') || site.value.startsWith('127.') || site.value.startsWith('0.0.0.0');
-      loginUrl.value = `${_isLocal ? 'http' : 'https'}://${site.value}`;
+      loginUrl.value = (loginUrlOverride || '').trim() || defaultLoginUrlForSite(site.value);
+      const statusPath = authApiPath('/auth-status');
+      if (!statusPath) return;
       try {
-        const s = await api(`/api/sites/${encodeURIComponent(site.value)}/auth-status`);
+        const s = await api(statusPath);
         authConfigured.value = s.configured;
         authMode.value = s.mode || null;
+        authScope.value = s.scope || 'none';
         authHasApiKey.value = !!s.has_api_key;
         authApiKeyHeader.value = s.auth_header || 'Authorization';
         authApiKeyQueryParam.value = s.auth_query_param || '';
@@ -2135,6 +2228,7 @@ createApp({
         authMode.value = null;
         authLoginChoice.value = null;
         authHasApiKey.value = false;
+        authScope.value = 'none';
       }
     }
 
@@ -2152,10 +2246,12 @@ createApp({
     }
 
     async function chooseAuthNotRequired() {
-      if (!site.value || authPublicSaving.value) return;
+      if (!site.value || !component.value || authPublicSaving.value) return;
+      const path = authApiPath('/auth/public');
+      if (!path) return;
       authPublicSaving.value = true;
       try {
-        await api(`/api/sites/${encodeURIComponent(site.value)}/auth/public`, { method: 'POST' });
+        await api(path, { method: 'POST' });
         await loadAuthStatus();
       } catch (e) {
         alert('Could not save public auth: ' + e.message);
@@ -2165,7 +2261,9 @@ createApp({
     }
 
     async function saveTargetApiKey() {
-      if (!site.value || authApiKeySaving.value) return;
+      if (!site.value || !component.value || authApiKeySaving.value) return;
+      const path = authApiPath('/auth/api-key');
+      if (!path) return;
       const key = authApiKeyInput.value.trim();
       if (!key) {
         authApiKeyError.value = 'Enter an API key.';
@@ -2174,7 +2272,7 @@ createApp({
       authApiKeySaving.value = true;
       authApiKeyError.value = '';
       try {
-        await api(`/api/sites/${encodeURIComponent(site.value)}/auth/api-key`, {
+        await api(path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2194,9 +2292,11 @@ createApp({
     }
 
     async function resetAuthSetup() {
-      if (!site.value) return;
+      if (!site.value || !component.value) return;
+      const path = authApiPath('/auth');
+      if (!path) return;
       try {
-        await api(`/api/sites/${encodeURIComponent(site.value)}/auth`, { method: 'DELETE' });
+        await api(path, { method: 'DELETE' });
       } catch {
         /* no auth file yet - still show choice */
       }
@@ -2204,6 +2304,7 @@ createApp({
       authMode.value = null;
       authLoginChoice.value = null;
       authHasApiKey.value = false;
+      authScope.value = 'none';
       authApiKeyInput.value = '';
       authApiKeyError.value = '';
     }
@@ -2219,7 +2320,41 @@ createApp({
       } catch { /* ignore */ }
     }
 
+    async function loadDiscoverContext() {
+      resetDiscoverAuthUi();
+      if (!site.value || !component.value) {
+        discoverTransport.value = 'browser';
+        compCfgEmpty.value = true;
+        authConfigured.value = false;
+        authMode.value = null;
+        authLoginChoice.value = null;
+        authHasApiKey.value = false;
+        authScope.value = 'none';
+        return;
+      }
+      try {
+        const data = await api(
+          `/api/sites/${encodeURIComponent(site.value)}/${encodeURIComponent(component.value)}/config`
+        );
+        compCfg.login_url = data.login_url || '';
+        await loadAuthStatus(compCfg.login_url);
+        applySubmissionToCompCfg(data.submission);
+        compCfgEmpty.value = !submissionConfigComplete(data.submission);
+      } catch {
+        discoverTransport.value = 'browser';
+        compCfgEmpty.value = true;
+        await loadAuthStatus();
+      }
+      if (discoverTransport.value === 'api') {
+        await onDiscoverTransportChange();
+      }
+    }
+
     async function onComponentChange() {
+      discoverJobId.value = null;
+      manualDiscoverJobId.value = null;
+      apiDiscoverJobId.value = null;
+      await loadDiscoverContext();
       await loadContext();
       await checkSetupAndNavigate();
     }
@@ -2233,9 +2368,13 @@ createApp({
 
     async function prepareAuthForLoginCapture() {
       if (authMode.value === 'none') {
-        await api(`/api/sites/${encodeURIComponent(site.value)}/auth`, { method: 'DELETE' });
+        const clearPath = authApiPath('/auth');
+        if (clearPath) {
+          await api(clearPath, { method: 'DELETE' });
+        }
         authConfigured.value = false;
         authMode.value = null;
+        authScope.value = 'none';
       }
       authLoginChoice.value = true;
     }
@@ -2721,17 +2860,21 @@ createApp({
         if (tab.value === 'export') loadLogs();
       } else if (tab.value === 'tests') tmLoadTestFiles();
       else if (tab.value === 'payloads') { loadPayloadTypes(); loadPayloadFiles(); }
-      else if (tab.value === 'discover') loadAuthStatus();
+      else if (tab.value === 'discover') loadDiscoverContext();
       else if (tab.value === 'run') {
         loadRunTestFiles();
         initRunPreviewConfig();
-      } else if (tab.value === 'discover') {
-        onDiscoverTransportChange();
       }
       else if (site.value && component.value) loadContext();
     });
 
     watch(discoverTransport, onDiscoverTransportChange);
+
+    watch(component, async (newComp, oldComp) => {
+      if (newComp === oldComp) return;
+      if (!site.value || !newComp) return;
+      await onComponentChange();
+    });
 
     watch(settingsTab, () => {
       if (tab.value !== 'settings') return;
@@ -2756,7 +2899,7 @@ createApp({
       openRunPreviewModal, closeRunPreviewModal,
       confirmRunLogin, saveAuth, dismissRunLoginModal, onRunTroubleshoot,
       allStrategies, allPlaybooks, runStrategies, runTestFiles, logs,
-      gen, run, runArtifactStatus, runUploadWarning, risk, RISK_TIME_WINDOWS, riskWindowCounts, riskAssessEnabled, riskWindowValue, exportWindowCounts, exportEnabled, exp, EXPORT_RISK_LEVELS, expSelectedRiskLevels, toggleExpRiskLevel, cache,
+      gen, run, runArtifactStatus, runUploadWarning, risk, RISK_TIME_WINDOWS, riskWindowCounts, riskAssessEnabled, riskWindowValue, exportWindowCounts, exportEnabled, exportSubmitBlockedMessage, exp, EXPORT_RISK_LEVELS, expSelectedRiskLevels, toggleExpRiskLevel, cache,
       showPlaybookModal, pbForm, pbGenerating, pbError, pbMsg, pbIdTouched, pbSuggestId, openPlaybookModal, closePlaybookModal, submitPlaybookGenerate,
       showModal, modalSite, modalComponent, modalComponents, modalNewSite, modalNewComponent,
       modalRenameSite, modalRenameComponent, modalError, modalMsg,
@@ -2779,7 +2922,7 @@ createApp({
       onSettingsApiPreset, syncApiDiscoverFromCompCfg,
       startApiDiscover, openManualComponentSettings,
       sampleRequestRunning,
-      loginJobId, loginRunning, loginUrl, authConfigured, authMode, authLoginChoice, authPublicSaving,
+      loginJobId, loginRunning, loginUrl, authConfigured, authMode, authScope, authLoginChoice, authPublicSaving,
       authApiKeySaving, authApiKeyInput, authApiKeyError, authHasApiKey,
       chooseAuthRequired, chooseAuthApiKey, chooseAuthNotRequired, saveTargetApiKey, resetAuthSetup,
       startLogin, sendLoginEnter,

@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
-from browser_bot.auth_state import get_auth_config_path, save_auth_config
+from browser_bot.auth_state import resolve_auth_read_path, save_auth_config
 from browser_bot.browser.launcher import launch_persistent_context_for_login
 from browser_bot.config import LOCALSTORAGE_MAX_VALUE_LEN, LOGIN_USE_PERSISTENT_CONTEXT
 from browser_bot.sites import get_domain_from_url, ensure_site_dir, get_login_profile_path
@@ -53,14 +53,18 @@ def _build_config_from_page(storage: dict, session_items: list, page_origin: str
     return config
 
 
-async def capture_login(login_url: str, *, force_persistent: bool = False) -> str | None:
+async def capture_login(
+    login_url: str,
+    *,
+    site: str | None = None,
+    component: str | None = None,
+    force_persistent: bool = False,
+) -> str | None:
     """
     Open headful browser, navigate to login_url, wait for user to log in,
     then save full auth state: cookies, localStorage, sessionStorage, headers.
-    If auth already exists for this domain, loads it so the user starts logged in.
-    Uses the human browser flow for non-persistent login.
-    Returns domain on success.
-    force_persistent=True forces persistent profile login flow even if config disables it.
+    Auth is stored per component when *component* is set, else site-level (legacy).
+    Returns site id on success.
     """
     if not isinstance(login_url, str):
         login_url = str(login_url or "").strip()
@@ -68,20 +72,31 @@ async def capture_login(login_url: str, *, force_persistent: bool = False) -> st
         login_url = login_url.strip()
     if not login_url:
         return None
-    domain = get_domain_from_url(login_url)
+    domain = (site or "").strip() or get_domain_from_url(login_url)
     if not domain:
         return None
+    component = (component or "").strip() or None
 
-    ensure_site_dir(domain)
-    auth_path = get_auth_config_path(domain)
-    storage_path = str(auth_path) if auth_path and auth_path.exists() else None
+    if component:
+        from browser_bot.sites import ensure_component_dir
+
+        ensure_component_dir(domain, component)
+    else:
+        ensure_site_dir(domain)
+
+    from browser_bot.auth_state import resolve_auth_read_path
+
+    auth_path = resolve_auth_read_path(domain, component)
+    storage_path = str(auth_path) if auth_path else None
 
     async with async_playwright() as p:
         use_persistent = LOGIN_USE_PERSISTENT_CONTEXT or force_persistent
         if use_persistent:
-            profile_path = get_login_profile_path(domain)
+            profile_path = get_login_profile_path(domain, component)
             profile_path.mkdir(parents=True, exist_ok=True)
-            browser, context = await launch_persistent_context_for_login(p, str(profile_path), site=domain)
+            browser, context = await launch_persistent_context_for_login(
+                p, str(profile_path), site=domain, component=component
+            )
             page = await context.new_page()
             await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
             print(f"\n  Log in at {login_url}")
@@ -121,13 +136,12 @@ async def capture_login(login_url: str, *, force_persistent: bool = False) -> st
             if config is None:
                 return None
 
-    save_auth_config(domain, config)
+    save_auth_config(domain, config, component=component)
 
-    # Remove legacy storage_state.json if present (we now use auth.json)
     from browser_bot.auth_state import get_auth_path
     from browser_bot.sites import STORAGE_STATE_FILE
 
-    legacy = get_auth_path(domain) / STORAGE_STATE_FILE
+    legacy = get_auth_path(domain, component) / STORAGE_STATE_FILE
     if legacy.exists():
         legacy.unlink()
 

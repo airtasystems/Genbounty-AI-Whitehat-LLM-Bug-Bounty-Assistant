@@ -117,7 +117,7 @@ async def run_ui_submission_single(
     if not posts:
         return [], None
 
-    storage_path = get_storage_state_path(site)
+    storage_path = get_storage_state_path(site, component)
     if not storage_path:
         return [], None
 
@@ -303,7 +303,13 @@ async def run_ui_submission_single(
 
     tracker.emit_run_done()
     log_path = (
-        _write_run_log(site, component, results, test_cases=test_cases or None)
+        _write_run_log(
+            site,
+            component,
+            results,
+            test_cases=test_cases or None,
+            suite_path=suite_path,
+        )
         if results
         else None
     )

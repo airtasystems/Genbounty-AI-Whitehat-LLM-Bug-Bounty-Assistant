@@ -18,6 +18,7 @@ from pipeline.injection_signals import (
     response_canary_compliance_leak,
     response_contains_injection_canary,
 )
+from payloads.resolve import infer_strategy_from_suite_path
 
 # Keep in sync with browser_bot.submit.common.TEST_PROMPT_DELIMITER
 _RUN_PROMPT_SUFFIX = "\n[TEXT ONLY. NO HTML OR MARKUP. MAX 600 CHARS]"
@@ -202,17 +203,28 @@ def _infer_playbook_id(suite: dict) -> str:
     return ""
 
 
-def _suite_meta(suite: dict) -> dict:
-    return {
+def _suite_meta(suite: dict, *, strategy: str = "") -> dict:
+    meta = {
         "playbook": suite.get("playbook", suite.get("framework", "")),
         "playbook_id": _infer_playbook_id(suite),
     }
+    if strategy:
+        meta["strategy"] = strategy
+    return meta
+
+
+def _resolve_log_strategy(run_log: dict, suite_path: str) -> str:
+    strategy = (run_log.get("strategy") or "").strip()
+    if strategy:
+        return strategy
+    return infer_strategy_from_suite_path(suite_path)
 
 
 def _convert_single(run_log: dict, suite: dict, suite_path: str) -> dict:
     entries = run_log.get("entries") or []
     index = _build_single_index(suite)
-    meta = _suite_meta(suite)
+    strategy = _resolve_log_strategy(run_log, suite_path)
+    meta = _suite_meta(suite, strategy=strategy)
     results: list[dict] = []
 
     for i, entry in enumerate(entries):
@@ -248,6 +260,8 @@ def _convert_single(run_log: dict, suite: dict, suite_path: str) -> dict:
             "ok": bool(response_text and str(response_text).strip()),
             "vector_type": vector_type,
         }
+        if strategy:
+            row["strategy"] = strategy
         if canary_echo:
             row["injection_canary_echo"] = True
         if canary_leak:
@@ -276,7 +290,8 @@ def _convert_multi(run_log: dict, suite: dict, suite_path: str) -> dict:
     """One attack_log row per multi-turn case - final turn only (for risk assessment)."""
     batches = run_log.get("batches") or []
     index = _build_multi_index(suite)
-    meta = _suite_meta(suite)
+    strategy = _resolve_log_strategy(run_log, suite_path)
+    meta = _suite_meta(suite, strategy=strategy)
     results: list[dict] = []
 
     for batch_i, batch in enumerate(batches):
@@ -284,7 +299,12 @@ def _convert_multi(run_log: dict, suite: dict, suite_path: str) -> dict:
         if not turns:
             continue
         matched: dict[str, Any] | None = None
-        if batch_i < len(index):
+        if batch.get("id"):
+            for idx_entry in index:
+                if idx_entry.get("id") == batch["id"]:
+                    matched = idx_entry
+                    break
+        if matched is None and batch_i < len(index):
             matched = index[batch_i]
         if not matched and turns:
             first_body = normalize_submitted_prompt(turns[0].get("input", ""))
@@ -294,16 +314,19 @@ def _convert_multi(run_log: dict, suite: dict, suite_path: str) -> dict:
                     break
 
         prior_turns: list[dict] = []
+        all_turns: list[dict] = []
         for turn_i, turn in enumerate(turns[:-1]):
             if matched and turn_i < len(matched.get("prompts", [])):
                 original_prompt = matched["prompts"][turn_i]
             else:
                 original_prompt = turn.get("input", "")
-            prior_turns.append({
+            turn_row = {
                 "turn": turn_i,
                 "prompt": original_prompt,
                 "response": turn.get("response") or "",
-            })
+            }
+            prior_turns.append(turn_row)
+            all_turns.append(turn_row)
 
         final_turn = turns[-1]
         final_i = len(turns) - 1
@@ -313,15 +336,25 @@ def _convert_multi(run_log: dict, suite: dict, suite_path: str) -> dict:
             final_prompt = final_turn.get("input", "")
 
         response_text = final_turn.get("response") or ""
+        final_row = {
+            "turn": final_i,
+            "prompt": final_prompt,
+            "response": response_text,
+        }
+        all_turns.append(final_row)
+
         row = {
-            "id": matched["id"] if matched else f"batch-{batch_i + 1}",
-            "category": matched["category"] if matched else "",
-            "description": matched["description"] if matched else "",
+            "id": batch.get("id") or (matched["id"] if matched else f"batch-{batch_i + 1}"),
+            "category": batch.get("category") or (matched["category"] if matched else ""),
+            "description": batch.get("description") or (matched["description"] if matched else ""),
             "prompt": final_prompt,
             "response": response_text,
             "ok": bool(response_text and str(response_text).strip()),
             "prior_turns": prior_turns,
+            "turns": all_turns,
         }
+        if strategy:
+            row["strategy"] = strategy
         if matched:
             vector_type = matched.get("vector_type") or "text_direct"
             row["vector_type"] = vector_type

@@ -24,14 +24,11 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from browser_bot.auth_state import (
-    auth_config_exists,
-    auth_mode_for_domain,
-    has_target_api_key,
-    is_auth_configured,
+    auth_status_payload,
+    clear_auth_config,
     save_api_key_auth,
     save_public_auth,
 )
-from browser_bot.sites import ensure_site_dir, AUTH_FILE
 from browser_bot.sites import (
     ensure_component_dir,
     ensure_site_dir,
@@ -129,42 +126,28 @@ async def api_llm_api_presets():
 
 
 @app.get("/api/sites/{site}/auth-status")
-async def api_auth_status(site: str):
-    from browser_bot.auth_state import load_auth_config
+async def api_auth_status_site(site: str):
+    """Legacy site-level auth status (no component fallback chain)."""
+    return auth_status_payload(site, component=None)
 
-    if not auth_config_exists(site):
-        return {
-            "configured": False,
-            "mode": None,
-            "has_api_key": False,
-            "auth_header": "",
-            "auth_query_param": "",
-            "use_bearer": False,
-        }
-    cfg = load_auth_config(site) or {}
-    headers = cfg.get("headers") or {}
-    query_params = cfg.get("query_params") or {}
-    auth_header = next(iter(headers.keys()), "") if headers else ""
-    auth_query_param = next(iter(query_params.keys()), "") if query_params else ""
-    use_bearer = False
-    if auth_header.lower() == "authorization":
-        val = str(headers.get(auth_header) or "")
-        use_bearer = bool(val) and val.lower().startswith("bearer ")
-    return {
-        "configured": is_auth_configured(site),
-        "mode": auth_mode_for_domain(site),
-        "has_api_key": has_target_api_key(site),
-        "auth_header": auth_header,
-        "auth_query_param": auth_query_param,
-        "use_bearer": use_bearer,
-    }
+
+@app.get("/api/sites/{site}/{component}/auth-status")
+async def api_auth_status(site: str, component: str):
+    ensure_component_dir(site, component)
+    return auth_status_payload(site, component)
 
 
 @app.post("/api/sites/{site}/auth/public")
-async def api_init_public_auth(site: str):
+async def api_init_public_auth_site(site: str):
+    path = save_public_auth(site, component=None)
+    return {"ok": True, "mode": "none", "path": str(path), "scope": "site"}
+
+
+@app.post("/api/sites/{site}/{component}/auth/public")
+async def api_init_public_auth(site: str, component: str):
     """Initialize auth.json for targets that do not require login."""
-    path = save_public_auth(site)
-    return {"ok": True, "mode": "none", "path": str(path)}
+    path = save_public_auth(site, component)
+    return {"ok": True, "mode": "none", "path": str(path), "scope": "component"}
 
 
 class TargetApiKeyBody(BaseModel):
@@ -176,12 +159,12 @@ class TargetApiKeyBody(BaseModel):
 
 
 @app.post("/api/sites/{site}/auth/api-key")
-async def api_save_target_api_key(site: str, body: TargetApiKeyBody):
-    """Store target API key in auth.json headers (no browser login session)."""
+async def api_save_target_api_key_site(site: str, body: TargetApiKeyBody):
     try:
         path = save_api_key_auth(
             site,
             body.api_key,
+            component=None,
             header_name=body.header_name,
             scheme=body.scheme,
             use_bearer=body.use_bearer,
@@ -189,15 +172,38 @@ async def api_save_target_api_key(site: str, body: TargetApiKeyBody):
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"ok": True, "mode": "api_key", "path": str(path), "has_api_key": True}
+    return {"ok": True, "mode": "api_key", "path": str(path), "has_api_key": True, "scope": "site"}
+
+
+@app.post("/api/sites/{site}/{component}/auth/api-key")
+async def api_save_target_api_key(site: str, component: str, body: TargetApiKeyBody):
+    """Store target API key in component auth.json (no browser login session)."""
+    try:
+        path = save_api_key_auth(
+            site,
+            body.api_key,
+            component=component,
+            header_name=body.header_name,
+            scheme=body.scheme,
+            use_bearer=body.use_bearer,
+            query_param_name=body.query_param_name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "mode": "api_key", "path": str(path), "has_api_key": True, "scope": "component"}
 
 
 @app.delete("/api/sites/{site}/auth")
-async def api_clear_auth(site: str):
-    """Reset auth so the user can choose login vs public access again."""
-    site_dir = ensure_site_dir(site)
-    (site_dir / AUTH_FILE).write_text("{}", encoding="utf-8")
-    return {"ok": True}
+async def api_clear_auth_site(site: str):
+    path = clear_auth_config(site, component=None)
+    return {"ok": True, "path": str(path), "scope": "site"}
+
+
+@app.delete("/api/sites/{site}/{component}/auth")
+async def api_clear_auth(site: str, component: str):
+    """Reset component auth so the user can choose login vs public access again."""
+    path = clear_auth_config(site, component)
+    return {"ok": True, "path": str(path), "scope": "component"}
 
 
 @app.get("/api/sites/{site}/components")

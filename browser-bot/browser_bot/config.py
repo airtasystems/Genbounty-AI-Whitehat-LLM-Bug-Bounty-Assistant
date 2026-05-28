@@ -119,6 +119,29 @@ def get_suite_test_cases(suite_path: Path | str | None = None) -> list[dict]:
         return []
 
 
+def get_suite_multi_test_cases(suite_path: Path | str | None = None) -> list[dict]:
+    """Load multi-turn test case dicts (prompts arrays) from a suite file."""
+    if not suite_path:
+        return []
+    try:
+        from browser_bot.artifacts import load_suite_multi_test_cases
+
+        return load_suite_multi_test_cases(suite_path)
+    except Exception:
+        return []
+
+
+def infer_strategy_from_suite_path(suite_path: Path | str | None = None) -> str:
+    if not suite_path:
+        return ""
+    try:
+        from browser_bot.artifacts import infer_strategy_from_suite_path as _infer
+
+        return _infer(suite_path)
+    except Exception:
+        return ""
+
+
 def get_posts_strings(suite_path: Path | None = None) -> list[str]:
     """Load string bodies for UI submission mode.
 
@@ -317,7 +340,7 @@ POOL_SIZE = 6
 
 # --- Pool + cluster browser (shared by FETCH_METHOD pool and cluster) ---
 # When True, enable all flags below (human Chrome, styles, stealth, context opts).
-POOL_CLUSTER_HUMAN_LIKE = True
+POOL_CLUSTER_HUMAN_LIKE = False
 # A/B test individually (ignored when POOL_CLUSTER_HUMAN_LIKE is True):
 # 1 = stylesheets   2 = playwright-stealth   3 = HUMAN_CHROME_ARGS   4 = locale/viewport/geo UA
 POOL_CLUSTER_ALLOW_STYLES = False

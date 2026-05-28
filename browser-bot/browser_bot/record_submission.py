@@ -2,8 +2,8 @@
 
 Discovery runs in 7 steps:
   1. Interactive browser - user navigates to page, presses Enter / Continue
-  2. Browser automation - detect whether the page supports file uploads
-  3. Multimodal config - when uploads exist, capture file input selector (auto + confirm)
+  2. Browser automation - detect dropdown menus and file upload support
+  3. Prerequisite dropdown + multimodal file input (dropdown before file when both exist)
   4. LLM / manual - prompt input selector
   5. Submit selector
   6. Headless verify submit - fills + clicks, detects response
@@ -158,6 +158,11 @@ _MANUAL_DISCOVERY_SCRIPT = r"""
 
     const input = el.closest('textarea, input:not([type="hidden"]), select, [contenteditable="true"], [contenteditable=""]');
     if (input) return input;
+
+    const dropdown = el.closest(
+      '[role="combobox"], [role="listbox"], button[aria-haspopup="listbox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]'
+    );
+    if (dropdown) return dropdown;
 
     const action = el.closest('button, [role="button"], a[href], input[type="submit"], input[type="button"]');
     if (action) return action;
@@ -460,6 +465,7 @@ _MANUAL_DISCOVERY_SCRIPT = r"""
         selector,
         tag: target.tagName.toLowerCase(),
         inputType: target.getAttribute("type") || "",
+        role: target.getAttribute("role") || "",
       });
     }
   }, true);
@@ -495,6 +501,40 @@ _MANUAL_DISCOVERY_SCRIPT = r"""
     return {
       supports_upload: fileInputs.length > 0,
       file_inputs: fileInputs,
+    };
+  };
+
+  window.__airtaScanSelects = () => {
+    const selectControls = [];
+    const seen = new Set();
+
+    function addControl(el, kind) {
+      if (!el || el.disabled) return;
+      const style = window.getComputedStyle(el);
+      const visible = style.display !== "none" && style.visibility !== "hidden" && !el.hidden;
+      const sel = selectorFor(el);
+      if (!sel || seen.has(sel)) return;
+      seen.add(sel);
+      let matchCount = 0;
+      try { matchCount = document.querySelectorAll(sel).length; } catch (_) {}
+      selectControls.push({
+        selector: sel,
+        kind,
+        visible,
+        unique: matchCount === 1,
+      });
+    }
+
+    document.querySelectorAll("select:not([disabled])").forEach((el) => addControl(el, "select"));
+    document.querySelectorAll('[role="combobox"]:not([disabled])').forEach((el) => addControl(el, "combobox"));
+    document.querySelectorAll('button[aria-haspopup="listbox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]').forEach((el) => {
+      if (el.tagName && el.tagName.toLowerCase() === "select") return;
+      addControl(el, "combobox");
+    });
+
+    return {
+      supports_select: selectControls.length > 0,
+      select_controls: selectControls,
     };
   };
 })();
@@ -594,10 +634,14 @@ async def _manual_pick_or_skip(
     *,
     step_title: str = "Confirm file upload",
     skip_summary: str | None = None,
+    allow_action: bool = False,
+    confirm_label: str = "File input selector",
 ) -> dict | None:
     """Wait for element pick or Skip; confirm before returning. Skip uses skip_summary when set."""
     while True:
-        event = await _manual_panel_event(page, message, mode="pick", action="Skip")
+        event = await _manual_panel_event(
+            page, message, mode="pick", action="Skip", allow_action=allow_action
+        )
         if event.get("type") == "skip":
             summary = skip_summary or "No file upload field will be saved for this component."
             if await _manual_step_confirm(page, step_title, summary):
@@ -607,9 +651,15 @@ async def _manual_pick_or_skip(
         if not selector:
             continue
         tag = (event.get("tag") or "").strip()
-        summary = f"File input selector:\n{selector}"
+        summary = f"{confirm_label}:\n{selector}"
         if tag:
             summary += f"\n\nElement: <{tag}>"
+        inp_type = _manual_input_type(event)
+        if inp_type in ("select", "combobox"):
+            summary += (
+                "\n\nAIRTA will open this control before upload during test runs. "
+                "Choose the option your UI needs (model/mode) if the menu stays open."
+            )
         if await _manual_step_confirm(page, step_title, summary):
             return event
 
@@ -777,13 +827,14 @@ HTML:
 Return ONLY valid JSON identifying the text input field(s) where a user types a prompt:
 {{
   "inputs": [
-    {{"selector": "css-selector", "type": "text|textarea|contenteditable|select|file", "value": "optional-for-select", "path_from": "payload when type is file"}}
+    {{"selector": "css-selector", "type": "text|textarea|contenteditable|select|combobox|file", "value": "optional-for-select", "path_from": "payload when type is file"}}
   ]
 }}
 
 Rules:
-- List fields in ORDER (file upload before text prompt when both exist).
-- Include text inputs, textareas, contenteditable divs, select dropdowns, and file inputs (type: file with path_from: payload).
+- List fields in ORDER: prerequisite dropdown (model/mode menu) first, then file upload, then text prompt when multiple exist.
+- Many chat UIs hide file upload until a model or attachment mode is chosen from a dropdown - include that control as type select or combobox before the file input.
+- Include text inputs, textareas, contenteditable divs, native select dropdowns, custom combobox triggers ([role="combobox"], buttons with aria-haspopup), and file inputs (type: file with path_from: payload).
 - EXCLUDE hidden inputs and submit/send buttons.
 - Prefer stable selectors: #id, [data-testid="x"], [name="x"], tag.class
 - Never use bare "div" or "span" - qualify with attribute or class.
@@ -962,10 +1013,13 @@ def _retry_extract_response_selector(
 def _manual_input_type(event: dict) -> str:
     tag = (event.get("tag") or "").lower()
     input_type = (event.get("inputType") or "").lower()
-    if tag == "textarea":
-        return "textarea"
+    role = (event.get("role") or "").lower()
+    if role == "combobox" or input_type == "combobox":
+        return "combobox"
     if tag == "select":
         return "select"
+    if tag == "textarea":
+        return "textarea"
     if tag == "input":
         return input_type or "text"
     return "contenteditable" if tag in ("div", "span", "p") else "text"
@@ -977,6 +1031,16 @@ def _file_input_config(selector: str) -> dict:
         "type": "file",
         "path_from": "payload",
     }
+
+
+def _select_input_config(selector: str, kind: str = "select") -> dict:
+    return {
+        "selector": selector,
+        "type": kind if kind in ("select", "combobox") else "select",
+    }
+
+
+_DROPDOWN_INPUT_TYPES = frozenset({"select", "combobox"})
 
 
 async def _detect_upload_capabilities(page) -> dict:
@@ -998,15 +1062,50 @@ async def _detect_upload_capabilities(page) -> dict:
     return {"supports_upload": False, "file_inputs": []}
 
 
+async def _detect_select_capabilities(page) -> dict:
+    """Scan the live page for native selects and custom dropdown triggers."""
+    await _install_manual_discovery_panel(page)
+    try:
+        result = await page.evaluate(
+            """() => {
+              if (typeof window.__airtaScanSelects === "function") {
+                return window.__airtaScanSelects();
+              }
+              return { supports_select: false, select_controls: [] };
+            }"""
+        )
+        if isinstance(result, dict):
+            return result
+    except Exception as exc:
+        print(f"  [!] Dropdown scan failed: {exc}")
+    return {"supports_select": False, "select_controls": []}
+
+
+def _pick_best_select_control(detection: dict) -> str | None:
+    candidates = detection.get("select_controls") or []
+    if not candidates:
+        return None
+    visible_unique = [c for c in candidates if c.get("visible") and c.get("unique")]
+    if visible_unique:
+        return str(visible_unique[0].get("selector") or "").strip() or None
+    visible = [c for c in candidates if c.get("visible")]
+    if visible:
+        return str(visible[0].get("selector") or "").strip() or None
+    return str(candidates[0].get("selector") or "").strip() or None
+
+
 def _selector_for_html_tag(tag) -> str:
+    return _selector_for_html_element(tag)
+
+
+def _selector_for_html_element(tag) -> str:
     if tag.get("id"):
         return f"#{tag['id']}"
-    parts = [tag.name or "input"]
-    for attr in ("data-testid", "name", "aria-label", "type"):
+    name = tag.name or "div"
+    for attr in ("data-testid", "name", "aria-label", "type", "role"):
         value = tag.get(attr)
         if value:
-            parts[0] = tag.name or "input"
-            return f'{tag.name}[{attr}="{value}"]' if tag.name else f'[{attr}="{value}"]'
+            return f'{name}[{attr}="{value}"]'
     return ""
 
 
@@ -1030,6 +1129,45 @@ def _detect_uploads_from_html(html: str) -> list[dict]:
     return out
 
 
+def _detect_selects_from_html(html: str) -> list[dict]:
+    """Detect native selects and custom dropdown triggers from captured HTML."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(tag, kind: str) -> None:
+        if tag.has_attr("disabled"):
+            return
+        selector = _selector_for_html_element(tag)
+        if not selector or selector in seen:
+            return
+        seen.add(selector)
+        out.append(_select_input_config(selector, kind))
+
+    for tag in soup.find_all("select"):
+        add(tag, "select")
+
+    for tag in soup.find_all(attrs={"role": "combobox"}):
+        add(tag, "combobox")
+
+    popup_selectors = (
+        '[aria-haspopup="listbox"]',
+        '[aria-haspopup="menu"]',
+        'button[aria-haspopup="listbox"]',
+    )
+    for css in popup_selectors:
+        for tag in soup.select(css):
+            if tag.name and tag.name.lower() == "select":
+                continue
+            add(tag, "combobox")
+
+    return out
+
+
 def _pick_best_file_input(detection: dict) -> str | None:
     candidates = detection.get("file_inputs") or []
     if not candidates:
@@ -1043,18 +1181,47 @@ def _pick_best_file_input(detection: dict) -> str | None:
     return str(candidates[0].get("selector") or "").strip() or None
 
 
-def _merge_upload_inputs(detected_files: list[dict], llm_inputs: list[dict]) -> list[dict]:
-    """Place verified file inputs before text inputs; avoid duplicate selectors."""
+def _merge_detected_inputs(
+    detected_dropdowns: list[dict],
+    detected_files: list[dict],
+    llm_inputs: list[dict],
+) -> list[dict]:
+    """Place prerequisite dropdowns before file inputs, then text inputs."""
+    dropdown_rows = list(detected_dropdowns)
+    seen = {row.get("selector") for row in dropdown_rows if row.get("selector")}
+
     file_rows = list(detected_files)
-    seen = {row.get("selector") for row in file_rows if row.get("selector")}
+    seen.update(row.get("selector") for row in file_rows if row.get("selector"))
+
     for inp in llm_inputs:
-        if inp.get("type") == "file" and inp.get("selector") not in seen:
-            row = dict(inp)
+        if not isinstance(inp, dict):
+            continue
+        selector = inp.get("selector")
+        if not selector or selector in seen:
+            continue
+        row = dict(inp)
+        inp_type = row.get("type", "text")
+        if inp_type in _DROPDOWN_INPUT_TYPES:
+            dropdown_rows.append(row)
+            seen.add(selector)
+        elif inp_type == "file":
             row.setdefault("path_from", "payload")
             file_rows.append(row)
-            seen.add(row.get("selector"))
-    text_rows = [dict(inp) for inp in llm_inputs if inp.get("type") != "file"]
-    return file_rows + text_rows
+            seen.add(selector)
+
+    text_rows = [
+        dict(inp)
+        for inp in llm_inputs
+        if isinstance(inp, dict)
+        and inp.get("type") not in _DROPDOWN_INPUT_TYPES
+        and inp.get("type") != "file"
+    ]
+    return dropdown_rows + file_rows + text_rows
+
+
+def _merge_upload_inputs(detected_files: list[dict], llm_inputs: list[dict]) -> list[dict]:
+    """Backward-compatible wrapper for dropdown-less merge."""
+    return _merge_detected_inputs([], detected_files, llm_inputs)
 
 
 async def _verify_selector_on_page(page, selector: str) -> bool:
@@ -1069,16 +1236,89 @@ async def _verify_selector_on_page(page, selector: str) -> bool:
         return False
 
 
+async def _configure_prerequisite_dropdown(
+    page,
+    *,
+    step_label: str,
+    select_info: dict,
+    supports_upload: bool,
+) -> dict | None:
+    """
+    Manual discovery step: optional dropdown/menu before file upload.
+    Returns input config dict or None when skipped.
+    """
+    candidates = select_info.get("select_controls") or []
+    auto_selector = _pick_best_select_control(select_info)
+    upload_hint = (
+        "On many targets you must pick a model, mode, or attachment type from a menu "
+        "before the upload button appears or works.\n\n"
+        if supports_upload
+        else ""
+    )
+    detected_hint = ""
+    if candidates:
+        detected_hint = f"Detected {len(candidates)} dropdown control(s) on this page.\n\n"
+        if auto_selector:
+            detected_hint += f"Suggested selector:\n{auto_selector}\n\n"
+
+    message = (
+        f"{step_label}. Prerequisite dropdown (optional).\n\n"
+        f"{upload_hint}"
+        f"{detected_hint}"
+        "Use the target UI to open the menu if needed, then click the dropdown control once "
+        "so AIRTA can save its selector.\n\n"
+        "Press Skip if no dropdown is required before upload."
+    )
+    skip_summary = (
+        f"Use auto-detected dropdown selector:\n{auto_selector}"
+        if auto_selector
+        else "No prerequisite dropdown will be saved."
+    )
+    pick_event = await _manual_pick_or_skip(
+        page,
+        message,
+        step_title=f"Confirm step {step_label} — prerequisite dropdown",
+        skip_summary=skip_summary if auto_selector else "No prerequisite dropdown will be saved.",
+        allow_action=True,
+        confirm_label="Dropdown selector",
+    )
+    if not pick_event:
+        return None
+    if pick_event.get("use_auto") and auto_selector:
+        verified = await _verify_selector_on_page(page, auto_selector)
+        if verified:
+            kind = next(
+                (c.get("kind") for c in candidates if c.get("selector") == auto_selector),
+                "select",
+            )
+            return {"selector": auto_selector, "type": kind or "select"}
+        return None
+    selector = (pick_event.get("selector") or "").strip()
+    if not selector:
+        return None
+    return {"selector": selector, "type": _manual_input_type(pick_event)}
+
+
 async def _configure_multimodal_upload(
     page,
     *,
     step_label: str,
     auto_selector: str | None,
+    dropdown_configured: bool = False,
 ) -> dict | None:
     """
     Manual discovery step: confirm or override auto-detected file input selector.
     Returns file input config dict or None when no upload should be configured.
     """
+    dropdown_note = (
+        "If you saved a dropdown in the previous step, open that menu and choose the "
+        "required model/mode first so the upload control is available.\n\n"
+        if dropdown_configured
+        else (
+            "If upload is hidden behind a model/mode menu, open that dropdown first, then "
+            "click the file upload control.\n\n"
+        )
+    )
     if auto_selector:
         verified = await _verify_selector_on_page(page, auto_selector)
         hint = "verified on page" if verified else "could not verify visibility"
@@ -1086,6 +1326,7 @@ async def _configure_multimodal_upload(
         file_event = await _manual_pick_or_skip(
             page,
             f"{step_label}. File upload detected.\n\n"
+            f"{dropdown_note}"
             f"Auto selector:\n{auto_selector}\n\n"
             "Click the file upload control to confirm or override,\n"
             "or press Skip to keep the auto selector.",
@@ -1104,6 +1345,7 @@ async def _configure_multimodal_upload(
     file_event = await _manual_pick_or_skip(
         page,
         f"{step_label}. File upload detected but no unique auto selector was found.\n\n"
+        f"{dropdown_note}"
         "Click the file upload control on the page,\n"
         "or press Skip if this target does not support uploads.",
         step_title=f"Confirm step {step_label} — file upload",
@@ -1134,7 +1376,7 @@ async def _headless_verify_input(
     ok=True  if the filled value is readable in the element after fill.
     ok=False if element not found, not visible, or fill did not stick.
     """
-    from browser_bot.submit.common import _first_visible_locator
+    from browser_bot.submit.common import _first_visible_locator, _fill_input
 
     result: dict = {"ok": False, "screenshot": None, "error": ""}
 
@@ -1165,6 +1407,9 @@ async def _headless_verify_input(
                     out_dir=probe_dir,
                 )
                 await loc.set_input_files(str(artifact))
+                result["ok"] = True
+            elif inp_type in _DROPDOWN_INPUT_TYPES:
+                await _fill_input(page, inp, "Hello")
                 result["ok"] = True
             else:
                 await loc.fill("Hello")
@@ -1229,7 +1474,7 @@ async def _headless_capture_with_input_filled(
     Used so the LLM can see the submit button that only appears after text is entered.
     Returns HTML string, or None on failure.
     """
-    from browser_bot.submit.common import _first_visible_locator
+    from browser_bot.submit.common import _fill_input
 
     result: dict = {"html": None}
 
@@ -1238,7 +1483,6 @@ async def _headless_capture_with_input_filled(
         await asyncio.sleep(2)
         for inp in inputs:
             try:
-                loc = await _first_visible_locator(page, inp["selector"])
                 if inp.get("type") == "file":
                     import tempfile
                     from payloads.generators import generate_payload
@@ -1249,9 +1493,9 @@ async def _headless_capture_with_input_filled(
                         {"content": "AIRTA probe upload", "filename": "probe.txt"},
                         out_dir=probe_dir,
                     )
-                    await loc.set_input_files(str(artifact))
+                    await _fill_input(page, inp, "Hello", artifact_path=artifact)
                 else:
-                    await loc.fill("Hello")
+                    await _fill_input(page, inp, "Hello")
                 await asyncio.sleep(0.2)
             except Exception:
                 pass
@@ -1542,7 +1786,7 @@ def run_manual_training(site: str, component: str) -> bool:
     """Manual browser-guided selector discovery using an in-page AIRTA panel."""
     profile_path = get_login_profile_path(site)
     has_profile = _should_use_login_profile(site)
-    storage_path = get_storage_state_path(site)
+    storage_path = get_storage_state_path(site, component)
     if not has_profile and not storage_path:
         print("  No auth for this site. Run 'Add login' first.")
         return False
@@ -1574,7 +1818,7 @@ def run_manual_training(site: str, component: str) -> bool:
                 await _install_manual_discovery_panel(page)
                 await page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
 
-                print("  [1/7] Browser opened. Waiting for target page confirmation...")
+                print("  [1/?] Browser opened. Waiting for target page confirmation...")
                 await _manual_continue_confirmed(
                     page,
                     "1. Navigate to the LLM/chat page you want AIRTA to test.\n\n"
@@ -1589,9 +1833,13 @@ def run_manual_training(site: str, component: str) -> bool:
 
                 inputs: list[dict] = []
 
-                print("  [2/7] Scanning page for file upload support...")
+                print("  [2/?] Scanning page for file upload and dropdown controls...")
                 upload_info = await _detect_upload_capabilities(page)
+                select_info = await _detect_select_capabilities(page)
                 supports_upload = bool(upload_info.get("supports_upload"))
+                supports_select = bool(select_info.get("supports_select"))
+                need_dropdown_step = supports_upload or supports_select
+                total_steps = 5 + (1 if need_dropdown_step else 0) + (1 if supports_upload else 0)
                 auto_file_selector = _pick_best_file_input(upload_info)
                 if supports_upload:
                     count = len(upload_info.get("file_inputs") or [])
@@ -1602,25 +1850,69 @@ def run_manual_training(site: str, component: str) -> bool:
                         print(f"      - {row.get('selector')} ({vis}, {uniq})")
                 else:
                     print("    upload support: no")
+                if supports_select:
+                    count = len(select_info.get("select_controls") or [])
+                    print(f"    dropdown support: yes ({count} control(s) found)")
+                    for row in select_info.get("select_controls") or []:
+                        vis = "visible" if row.get("visible") else "hidden"
+                        uniq = "unique" if row.get("unique") else "ambiguous"
+                        kind = row.get("kind") or "select"
+                        print(f"      - {row.get('selector')} ({kind}, {vis}, {uniq})")
+                else:
+                    print("    dropdown support: no")
+
+                if not supports_upload:
                     await _manual_continue_confirmed(
                         page,
-                        "2. No file upload control detected on this page.\n\n"
-                        "Click Continue to configure the text prompt input.",
-                        step_title="Confirm step 2 — file upload scan",
+                        f"2/{total_steps}. No file upload control detected on this page.\n\n"
+                        + (
+                            "Dropdown controls were detected; the next step can capture one if needed.\n\n"
+                            if supports_select
+                            else ""
+                        )
+                        + "Click Continue to configure the text prompt input.",
+                        step_title=f"Confirm step 2/{total_steps} — page scan",
                         build_summary=lambda: (
                             "No file upload control will be saved.\n"
-                            "Next: pick the text prompt input."
+                            + (
+                                "Next: optional prerequisite dropdown.\n"
+                                if supports_select
+                                else "Next: pick the text prompt input."
+                            )
                         ),
                         action="Continue",
                     )
 
+                dropdown_cfg: dict | None = None
+                current_step = 3
+                if need_dropdown_step:
+                    print(f"  [{current_step}/{total_steps}] Configuring prerequisite dropdown...")
+                    dropdown_cfg = await _configure_prerequisite_dropdown(
+                        page,
+                        step_label=f"{current_step}/{total_steps}",
+                        select_info=select_info,
+                        supports_upload=supports_upload,
+                    )
+                    if dropdown_cfg:
+                        inputs.append(dropdown_cfg)
+                        submission["inputs"] = inputs
+                        _save_partial(site, component, submission)
+                        print(
+                            f"    dropdown: {dropdown_cfg['selector']} "
+                            f"(type={dropdown_cfg.get('type', 'select')})"
+                        )
+                    else:
+                        print("    dropdown: (not configured)")
+                    current_step += 1
+
                 file_cfg: dict | None = None
                 if supports_upload:
-                    print("  [3/7] Configuring multimodal file upload...")
+                    print(f"  [{current_step}/{total_steps}] Configuring multimodal file upload...")
                     file_cfg = await _configure_multimodal_upload(
                         page,
-                        step_label="3",
+                        step_label=f"{current_step}/{total_steps}",
                         auto_selector=auto_file_selector,
+                        dropdown_configured=bool(dropdown_cfg),
                     )
                     if file_cfg:
                         inputs.append(file_cfg)
@@ -1632,13 +1924,14 @@ def run_manual_training(site: str, component: str) -> bool:
                         print(f"    file input: {file_cfg['selector']} (path_from=payload)")
                     else:
                         print("    file input: (not configured)")
+                    current_step += 1
 
-                print("  [4/7] Waiting for prompt input selection...")
+                print(f"  [{current_step}/{total_steps}] Waiting for prompt input selection...")
                 input_event = await _manual_pick_selector(
                     page,
-                    "4. Write a short test prompt in the prompt/input field.\n\n"
+                    f"{current_step}/{total_steps}. Write a short test prompt in the prompt/input field.\n\n"
                     "Then click that same input field once so AIRTA can save its selector.",
-                    step_title="Confirm step 4 — prompt input",
+                    step_title=f"Confirm step {current_step}/{total_steps} — prompt input",
                 )
                 input_selector = input_event["selector"]
                 input_config = {
@@ -1649,25 +1942,27 @@ def run_manual_training(site: str, component: str) -> bool:
                 submission["inputs"] = inputs
                 _save_partial(site, component, submission)
                 print(f"    input: {input_selector} (type={input_config['type']})")
+                current_step += 1
 
-                print("  [5/7] Waiting for submit button selection...")
+                print(f"  [{current_step}/{total_steps}] Waiting for submit button selection...")
                 submit_event = await _manual_pick_selector(
                     page,
-                    "5. Click the real Send/Submit button.\n\n"
+                    f"{current_step}/{total_steps}. Click the real Send/Submit button.\n\n"
                     "AIRTA will save the button selector and allow the click through, so the prompt is submitted.",
-                    step_title="Confirm step 5 — submit button",
+                    step_title=f"Confirm step {current_step}/{total_steps} — submit button",
                     allow_action=True,
                 )
                 submission["submit_selector"] = submit_event["selector"]
                 _save_partial(site, component, submission)
                 print(f"    submit_selector: {submit_event['selector']}")
+                current_step += 1
 
-                print("  [6/7] Waiting for response text selection...")
+                print(f"  [{current_step}/{total_steps}] Waiting for response text selection...")
                 response_event = await _manual_pick_selector(
                     page,
-                    "6. Wait for the model response to appear.\n\n"
+                    f"{current_step}/{total_steps}. Wait for the model response to appear.\n\n"
                     "Then click directly on the response text/container so AIRTA can save its selector.",
-                    step_title="Confirm step 6 — response container",
+                    step_title=f"Confirm step {current_step}/{total_steps} — response container",
                 )
                 submission["response_selector"] = response_event["selector"]
                 _save_partial(site, component, submission)
@@ -1705,6 +2000,14 @@ def run_manual_training(site: str, component: str) -> bool:
     print(f"    start_url:         {submission.get('start_url') or '(unset)'}")
     print(f"    inputs:            {len(submission['inputs'])} field(s)")
     file_inputs = [i for i in submission["inputs"] if i.get("type") == "file"]
+    dropdown_inputs = [
+        i for i in submission["inputs"] if i.get("type") in ("select", "combobox")
+    ]
+    if dropdown_inputs:
+        print(
+            f"    prerequisite dropdown: {dropdown_inputs[0].get('selector')} "
+            f"(type={dropdown_inputs[0].get('type')})"
+        )
     if file_inputs:
         print(f"    multimodal upload: {file_inputs[0].get('selector')}")
     print(f"    submit_selector:   {submission['submit_selector']}")
@@ -1718,9 +2021,9 @@ def run_training(site: str, component: str) -> bool:
     Bulletproof 7-step discovery - fully automated after the first Enter:
 
     1. Interactive browser   - user navigates to page, presses Enter
-    2. Upload detection      - scan page HTML for file inputs
-    3. LLM extracts inputs   - printed, saved immediately (file inputs first)
-    4. Headless verify input - fills text / probe file, screenshot
+    2. Dropdown + upload scan - scan page HTML for prerequisite menus and file inputs
+    3. LLM extracts inputs   - printed, saved immediately (dropdown, file, then text)
+    4. Headless verify input - fills dropdown/file/text, screenshot
     5. LLM extracts submit   - from filled-input HTML so send button is visible
     6. Headless verify submit - fills + clicks, detects POST/URL change, captures response HTML
     7. LLM extracts response selector - from post-response HTML
@@ -1728,7 +2031,7 @@ def run_training(site: str, component: str) -> bool:
     """
     profile_path = get_login_profile_path(site)
     has_profile = _should_use_login_profile(site)
-    storage_path = get_storage_state_path(site)
+    storage_path = get_storage_state_path(site, component)
     if not has_profile and not storage_path:
         print("  No auth for this site. Run 'Add login' first.")
         return False
@@ -1754,6 +2057,7 @@ def run_training(site: str, component: str) -> bool:
     print("\n" + "─" * 50)
     print("  [1/7] Opening browser - navigate to the submission page")
     print("        and press Enter when the input area is visible.")
+    print("        If upload is behind a model/mode menu, open that dropdown first.")
     if has_profile:
         print("        Using persistent login profile for session restoration.")
     print("─" * 50)
@@ -1768,6 +2072,7 @@ def run_training(site: str, component: str) -> bool:
             async def _capture(page):
                 await page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
                 print("\n  Navigate to the submission page.")
+                print("  If file upload is hidden behind a model/mode menu, open that dropdown first.")
                 print("  Press Enter when the input area is fully visible...")
                 await _wait_for_enter()
                 body_html = await _get_page_html(page)
@@ -1807,13 +2112,20 @@ def run_training(site: str, component: str) -> bool:
     _save_partial(site, component, submission)
 
     # -----------------------------------------------------------------------
-    # Step 2 - Detect file upload support from captured HTML
+    # Step 2 - Detect dropdown menus and file upload support from captured HTML
     # -----------------------------------------------------------------------
     print("\n" + "─" * 50)
-    print("  [2/7] Detecting file upload support...")
+    print("  [2/7] Detecting dropdown menus and file upload support...")
     print("─" * 50)
 
+    detected_dropdown_inputs = _detect_selects_from_html(form_html)
     detected_file_inputs = _detect_uploads_from_html(form_html)
+    if detected_dropdown_inputs:
+        print(f"  Dropdown support: yes ({len(detected_dropdown_inputs)} control(s))")
+        for row in detected_dropdown_inputs:
+            print(f"    dropdown: {row['selector']} (type={row.get('type', 'select')})")
+    else:
+        print("  Dropdown support: no")
     if detected_file_inputs:
         print(f"  Upload support: yes ({len(detected_file_inputs)} file input(s))")
         for row in detected_file_inputs:
@@ -1828,10 +2140,15 @@ def run_training(site: str, component: str) -> bool:
     # -----------------------------------------------------------------------
     print("\n" + "─" * 50)
     print("  [3/7] Extracting input selector via AI...")
+    print("        (dropdown before file before text prompt when multimodal)")
     print("─" * 50)
 
     llm_inputs = _retry_extract_inputs(form_html, page_url)
-    merged_inputs = _merge_upload_inputs(detected_file_inputs, llm_inputs)
+    merged_inputs = _merge_detected_inputs(
+        detected_dropdown_inputs,
+        detected_file_inputs,
+        llm_inputs,
+    )
 
     if not merged_inputs:
         print("  [!] Input selector not found after retries. Discovery cannot continue.")
@@ -1840,7 +2157,12 @@ def run_training(site: str, component: str) -> bool:
         return False
 
     for inp in merged_inputs:
-        suffix = " (multimodal)" if inp.get("type") == "file" else ""
+        if inp.get("type") in _DROPDOWN_INPUT_TYPES:
+            suffix = " (prerequisite dropdown)"
+        elif inp.get("type") == "file":
+            suffix = " (multimodal)"
+        else:
+            suffix = ""
         print(f"    input: {inp['selector']} (type={inp.get('type', 'text')}){suffix}")
 
     submission["inputs"] = merged_inputs
@@ -1964,7 +2286,13 @@ def run_training(site: str, component: str) -> bool:
     print("\n" + "═" * 50)
     print(f"  Discovery complete -> sites/{site}/{component}/config.yaml")
     print(f"    inputs:            {len(confirmed_inputs)} field(s)")
+    dropdown_inputs = [i for i in confirmed_inputs if i.get("type") in _DROPDOWN_INPUT_TYPES]
     file_inputs = [i for i in confirmed_inputs if i.get("type") == "file"]
+    if dropdown_inputs:
+        print(
+            f"    prerequisite dropdown: {dropdown_inputs[0].get('selector')} "
+            f"(type={dropdown_inputs[0].get('type')})"
+        )
     if file_inputs:
         print(f"    multimodal upload: {file_inputs[0].get('selector')}")
     print(f"    submit_selector:   {submit_selector or '(none)'}")

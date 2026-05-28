@@ -129,9 +129,9 @@ class PageBlockedError(Exception):
         super().__init__(self.message)
 
 
-def _site_has_saved_session(site: str) -> bool:
+def _site_has_saved_session(site: str, component: str | None = None) -> bool:
     """True only when auth.json holds a real session (not public/no-login stub)."""
-    config = load_auth_config(site)
+    config = load_auth_config(site, component)
     if not config:
         return False
     if config.get("auth_mode") in ("none", "api_key"):
@@ -376,7 +376,7 @@ async def _resolve_login_wall(
     if not await _login_wall_visible(page):
         return
 
-    if _site_has_saved_session(site):
+    if _site_has_saved_session(site, component):
         from browser_bot.submit.common import log_resilience
 
         log_resilience(

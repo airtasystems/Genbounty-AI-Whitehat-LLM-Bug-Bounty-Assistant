@@ -172,23 +172,28 @@ def _normalize_provider_auth(
     return out
 
 
-def auth_query_params_for_site(site: str | None) -> dict[str, str]:
+def auth_query_params_for_site(site: str | None, component: str | None = None) -> dict[str, str]:
     if not site:
         return {}
     from browser_bot.auth_state import load_auth_config
 
-    cfg = load_auth_config(site) or {}
+    cfg = load_auth_config(site, component) or {}
     raw = cfg.get("query_params") or {}
     return {str(k): str(v) for k, v in raw.items()}
 
 
-def auth_headers_for_site(site: str | None, *, url: str = "") -> dict[str, str]:
+def auth_headers_for_site(
+    site: str | None,
+    *,
+    component: str | None = None,
+    url: str = "",
+) -> dict[str, str]:
     """Merge saved auth headers and cookies for API requests."""
     if not site:
         return {}
     from browser_bot.auth_state import load_auth_config
 
-    cfg = load_auth_config(site) or {}
+    cfg = load_auth_config(site, component) or {}
     headers = {str(k): str(v) for k, v in (cfg.get("headers") or {}).items()}
     cookies = cfg.get("cookies") or []
     if cookies:
@@ -202,7 +207,7 @@ def auth_headers_for_site(site: str | None, *, url: str = "") -> dict[str, str]:
     return _normalize_provider_auth(headers, url, query_params)
 
 
-def resolve_api_url(sub: dict[str, Any], *, site: str | None = None) -> str:
+def resolve_api_url(sub: dict[str, Any], *, site: str | None = None, component: str | None = None) -> str:
     """Substitute {{model}} and merge auth query params into the request URL."""
     url = str(sub.get("api_url") or "").strip()
     model = str(sub.get("api_model") or "").strip()
@@ -210,7 +215,7 @@ def resolve_api_url(sub: dict[str, Any], *, site: str | None = None) -> str:
         raise ValueError("api_model is required when api_url contains {{model}}")
     if model:
         url = url.replace("{{model}}", model)
-    extra = auth_query_params_for_site(site)
+    extra = auth_query_params_for_site(site, component)
     return _merge_url_query(url, extra)
 
 
@@ -263,6 +268,7 @@ def _upload_document(
     artifact_path: Path,
     *,
     site: str | None = None,
+    component: str | None = None,
     timeout: float = 120.0,
 ) -> tuple[str | None, str | None]:
     upload_url = sub.get("upload_url") or sub.get("api_upload_url")
@@ -270,7 +276,7 @@ def _upload_document(
         return None, "upload_url not configured"
     file_field = sub.get("upload_file_field", "file")
     headers = dict(sub.get("api_headers") or {})
-    headers.update(auth_headers_for_site(site))
+    headers.update(auth_headers_for_site(site, component=component))
     content = artifact_path.read_bytes()
     mime, _ = mimetypes.guess_type(artifact_path.name)
     mime = mime or "application/octet-stream"
@@ -297,6 +303,7 @@ def do_api_request(
     prompt: str,
     *,
     site: str | None = None,
+    component: str | None = None,
     timeout: float = 120.0,
     test_case: dict | None = None,
     suite_path: Path | str | None = None,
@@ -306,21 +313,33 @@ def do_api_request(
     transport = (sub.get("transport") or "api").lower()
     if transport == "api_document":
         return do_api_document_request(
-            sub, prompt, site=site, timeout=timeout, test_case=test_case, suite_path=suite_path
+            sub,
+            prompt,
+            site=site,
+            component=component,
+            timeout=timeout,
+            test_case=test_case,
+            suite_path=suite_path,
         )
     if transport == "api_multipart":
         return do_api_multipart_request(
-            sub, prompt, site=site, timeout=timeout, test_case=test_case, suite_path=suite_path
+            sub,
+            prompt,
+            site=site,
+            component=component,
+            timeout=timeout,
+            test_case=test_case,
+            suite_path=suite_path,
         )
 
     try:
-        url = resolve_api_url(sub, site=site)
+        url = resolve_api_url(sub, site=site, component=component)
     except ValueError as exc:
         return 0, None, str(exc)
 
     method = (sub.get("api_method") or "POST").upper()
     headers = {"Accept": "application/json", **dict(sub.get("api_headers") or {})}
-    headers.update(auth_headers_for_site(site, url=url))
+    headers.update(auth_headers_for_site(site, component=component, url=url))
 
     body_obj = build_api_request_body(
         sub,
@@ -347,6 +366,7 @@ def do_api_document_request(
     prompt: str,
     *,
     site: str | None = None,
+    component: str | None = None,
     timeout: float = 120.0,
     test_case: dict | None = None,
     suite_path: Path | str | None = None,
@@ -363,14 +383,14 @@ def do_api_document_request(
     if not upload_ok or not artifact_path or not artifact_path.is_file():
         return 0, None, "failed to resolve upload artifact"
 
-    doc_id, err = _upload_document(sub, artifact_path, site=site, timeout=timeout)
+    doc_id, err = _upload_document(sub, artifact_path, site=site, component=component, timeout=timeout)
     if err or not doc_id:
         return 0, None, err or "upload failed"
 
     url = sub["api_url"]
     method = (sub.get("api_method") or "POST").upper()
     headers = {"Accept": "application/json", **dict(sub.get("api_headers") or {})}
-    headers.update(auth_headers_for_site(site))
+    headers.update(auth_headers_for_site(site, component=component))
     body_obj = apply_prompt_template(
         sub.get("api_body") or {"prompt": "{{prompt}}", "document_id": "{{document_id}}"},
         prompt,
@@ -393,6 +413,7 @@ def do_api_multipart_request(
     prompt: str,
     *,
     site: str | None = None,
+    component: str | None = None,
     timeout: float = 120.0,
     test_case: dict | None = None,
     suite_path: Path | str | None = None,
@@ -424,7 +445,7 @@ def do_api_multipart_request(
 
     body, ctype = _encode_multipart(fields, files)
     headers = dict(sub.get("api_headers") or {})
-    headers.update(auth_headers_for_site(site))
+    headers.update(auth_headers_for_site(site, component=component))
     headers["Content-Type"] = ctype
     status, raw = _http_request(url, method="POST", headers=headers, data=body, timeout=timeout)
     if status >= 400:

@@ -254,6 +254,64 @@ def _normalize_experts_summary(items: object, *, legacy: bool) -> list[dict[str,
     return out
 
 
+def _infer_strategy_from_source(source_file: object) -> str | None:
+    if not isinstance(source_file, str) or not source_file.strip():
+        return None
+    lower = source_file.replace("\\", "/").lower()
+    if "/multi-shot/" in lower:
+        return "multi_shot"
+    if "/zero-shot/" in lower:
+        return "zero_shot"
+    return None
+
+
+def _normalize_turn_record(turn: object) -> dict[str, Any] | None:
+    if not isinstance(turn, dict):
+        return None
+    turn_num = turn.get("turn")
+    if turn_num is None:
+        return None
+    try:
+        turn_index = int(turn_num)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "turn": turn_index,
+        "prompt": str(turn.get("prompt") or ""),
+        "response": str(turn.get("response") or ""),
+    }
+
+
+def _normalize_turns_list(turns: object) -> list[dict[str, Any]] | None:
+    if not isinstance(turns, list) or not turns:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in turns:
+        row = _normalize_turn_record(item)
+        if row is not None:
+            out.append(row)
+    return out or None
+
+
+def _multiturn_export_fields(item: dict, *, source_file: object = None) -> dict[str, Any]:
+    """Map strategy and multi-turn conversation fields for API export."""
+    out: dict[str, Any] = {}
+    strategy = item.get("strategy")
+    if isinstance(strategy, str) and strategy.strip():
+        out["strategy"] = strategy.strip()
+    else:
+        inferred = _infer_strategy_from_source(source_file)
+        if inferred:
+            out["strategy"] = inferred
+    prior_turns = _normalize_turns_list(item.get("prior_turns"))
+    if prior_turns:
+        out["prior_turns"] = prior_turns
+    turns = _normalize_turns_list(item.get("turns"))
+    if turns:
+        out["turns"] = turns
+    return out
+
+
 def _legacy_optional_result_fields(item: dict) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("description", "expected_behavior", "ok", "status", "error", "response_html"):
@@ -287,7 +345,12 @@ def _optional_result_fields(item: dict) -> dict[str, Any]:
     return out
 
 
-def build_legacy_export_result(item: dict, *, default_severity: str | None = None) -> dict[str, Any]:
+def build_legacy_export_result(
+    item: dict,
+    *,
+    default_severity: str | None = None,
+    source_file: object = None,
+) -> dict[str, Any]:
     """Map pipeline row to imported-reports/company schema."""
     risk_level = normalize_severity(item.get("risk_level"), default_severity)
     mandate = item.get("mandate") or item.get("category") or ""
@@ -300,6 +363,7 @@ def build_legacy_export_result(item: dict, *, default_severity: str | None = Non
         "judge_reasoning": item.get("judge_reasoning", ""),
     }
     result.update(_legacy_optional_result_fields(item))
+    result.update(_multiturn_export_fields(item, source_file=source_file))
     if item.get("experts_summary"):
         result["experts_summary"] = _normalize_experts_summary(item["experts_summary"], legacy=True)
     return result
@@ -320,13 +384,18 @@ def build_legacy_export_payload(
     default_severity: str | None = None,
 ) -> dict[str, Any]:
     rows = results if results is not None else data.get("adversarial_results", [])
+    source_file = data.get("source_file")
     payload: dict[str, Any] = {
         "timestamp": _normalize_timestamp(data.get("timestamp", "")),
         "framework": _legacy_framework(data),
         "source_file": data.get("source_file", ""),
         "run_log_dir": data.get("run_log_dir", ""),
         "adversarial_results": [
-            build_legacy_export_result(item, default_severity=default_severity)
+            build_legacy_export_result(
+                item,
+                default_severity=default_severity,
+                source_file=source_file,
+            )
             for item in rows
         ],
     }
@@ -414,11 +483,21 @@ def enrich_results_for_export(data: dict, results: list[dict]) -> list[dict]:
             if tid and tid in run_log_responses:
                 row["response"] = run_log_responses[tid]
 
+        if not row.get("strategy"):
+            inferred = _infer_strategy_from_source(data.get("source_file"))
+            if inferred:
+                row["strategy"] = inferred
+
         enriched.append(row)
     return enriched
 
 
-def build_security_export_result(item: dict, *, default_severity: str | None = None) -> dict[str, Any]:
+def build_security_export_result(
+    item: dict,
+    *,
+    default_severity: str | None = None,
+    source_file: object = None,
+) -> dict[str, Any]:
     """Map pipeline row to security-assessments/import schema."""
     severity = normalize_severity(item.get("risk_level"), default_severity)
     ok = item.get("ok")
@@ -437,6 +516,7 @@ def build_security_export_result(item: dict, *, default_severity: str | None = N
         "attack_blocked": _attack_blocked(severity),
     }
     result.update(_security_optional_result_fields(item))
+    result.update(_multiturn_export_fields(item, source_file=source_file))
     if item.get("experts_summary"):
         result["experts_summary"] = _normalize_experts_summary(item["experts_summary"], legacy=False)
     return result
@@ -450,6 +530,7 @@ def build_security_export_payload(
 ) -> dict[str, Any]:
     raw_rows = results if results is not None else data.get("adversarial_results", [])
     rows = enrich_results_for_export(data, raw_rows) if export_schema() == "security" else raw_rows
+    source_file = data.get("source_file")
     payload: dict[str, Any] = {
         "assessment_type": ASSESSMENT_TYPE,
         "timestamp": _normalize_timestamp(data.get("timestamp", "")),
@@ -459,7 +540,11 @@ def build_security_export_payload(
         "run_log_dir": data.get("run_log_dir", ""),
         "attack_log": data.get("attack_log", data.get("compliance_log", "")),
         "results": [
-            build_security_export_result(item, default_severity=default_severity)
+            build_security_export_result(
+                item,
+                default_severity=default_severity,
+                source_file=source_file,
+            )
             for item in rows
         ],
     }

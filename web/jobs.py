@@ -303,7 +303,7 @@ def _assess_attack_log(cl_path: Path) -> Path:
     attack_by_id = {r["id"]: r for r in all_log_results if "id" in r}
     for r in risk_results:
         cl_entry = attack_by_id.get(r.get("id", ""), {})
-        for fld in ("description", "expected_behavior", "status", "ok", "error"):
+        for fld in ("description", "expected_behavior", "status", "ok", "error", "strategy", "prior_turns", "turns"):
             if fld not in r:
                 r[fld] = cl_entry.get(fld)
 
@@ -326,6 +326,8 @@ def _assess_attack_log(cl_path: Path) -> Path:
         "adversarial_results": risk_results,
         "category_rollup": category_rollup,
     }
+    if log_data.get("strategy"):
+        report["strategy"] = log_data["strategy"]
     report_path = cl_path.parent / "pipeline_report.json"
     report_path.write_text(_json.dumps(report, indent=2), encoding="utf-8")
     print(f"[+] Pipeline report: {report_path}")
@@ -626,7 +628,7 @@ async def _start_login(job: Job):
         job.status = "failed"
         job._event.set()
         return
-    cmd = [sys.executable, "-u", str(worker), url]
+    cmd = [sys.executable, "-u", str(worker), job.site, job.component, url]
     await _run_subprocess_job(job, cmd)
 
 
@@ -816,7 +818,7 @@ async def _start_sample_request(job: Job):
                 raise RuntimeError(f"Sample API request failed: {err}")
             return
 
-        storage_path = get_storage_state_path(job.site)
+        storage_path = get_storage_state_path(job.site, job.component)
         if not storage_path:
             raise RuntimeError(f"No saved auth available for {job.site}. Run Add Login first.")
 

@@ -230,9 +230,10 @@ async def refresh_auth_async(
     if not refresh_url:
         return None, "No refresh_url in config. Add refresh_url to component config.yaml."
 
-    config = load_auth_config(domain)
+    config = load_auth_config(domain, component)
     if not config:
-        return None, "No auth.json for this site. Run 'Add login' first."
+        label = f"{domain}/{component}" if component else domain
+        return None, f"No auth.json for {label}. Run 'Add login' first."
 
     refresh_cfg = _get_refresh_config(domain, component)
     rt_name = refresh_cfg["refresh_token_cookie_name"]
@@ -249,9 +250,10 @@ async def refresh_auth_async(
 
     from browser_bot.sites import get_storage_state_path
 
-    storage_path = get_storage_state_path(domain)
+    storage_path = get_storage_state_path(domain, component)
     if not storage_path:
-        return None, "No auth config found for this site."
+        label = f"{domain}/{component}" if component else domain
+        return None, f"No auth config found for {label}."
 
     comp_config = load_component_config(domain, component or "")
     refresh_mode = comp_config.get("refresh_mode", "both")
@@ -462,7 +464,7 @@ async def refresh_auth_async(
                     item["value"] = csrf_token_resp
                     break
 
-    save_auth_config(domain, config)
+    save_auth_config(domain, config, component=component)
     return config, None
 
 

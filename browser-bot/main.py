@@ -119,6 +119,7 @@ async def _setup_fetchers(
     url_count: int | None = None,
     post_count: int | None = None,
     *,
+    component: str | None = None,
     human_only: bool = False,
 ):
     """Shared setup for GET and POST. Returns (pool_fetcher, cluster_fetcher, human_fetcher, pool_context, cluster_browser, cluster_contexts).
@@ -126,7 +127,7 @@ async def _setup_fetchers(
     human_only: when True, behave like FETCH_METHOD=human (no pool/cluster browsers or fetchers).
     """
     p = playwright
-    storage_state = get_storage_state_path(primary_domain)
+    storage_state = get_storage_state_path(primary_domain, component)
     storage_state_str = str(storage_state) if storage_state else None
 
     pool_fetcher = None
@@ -399,7 +400,7 @@ async def run_posts(site: str | None = None, component: str | None = None, *, mo
                     )
                 async with async_playwright() as p:
                     pool_fetcher, cluster_fetcher, human_fetcher, pool_context, cluster_browser, cluster_contexts = await _setup_fetchers(
-                        p, primary_domain, post_count=post_count, human_only=human_only
+                        p, primary_domain, post_count=post_count, component=component, human_only=human_only
                     )
                     results, log_path = await run_submission(
                         site,

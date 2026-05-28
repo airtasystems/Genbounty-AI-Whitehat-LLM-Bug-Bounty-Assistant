@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from browser_bot.browser.human_behavior import human_mouse_wander
-from browser_bot.config import EVASION_REQUEST_DELAY_S, FETCH_METHOD, get_posts_batches
+from browser_bot.config import EVASION_REQUEST_DELAY_S, FETCH_METHOD, get_posts_batches, get_suite_multi_test_cases
 from browser_bot.live_preview import live_preview_context
 from browser_bot.page_blockers import (
     PageBlockedError,
@@ -127,7 +127,7 @@ async def run_ui_submission_multi(
         return [], None
     batches = [[append_test_prompt_delimiter(t) for t in batch] for batch in batches_raw]
 
-    storage_path = get_storage_state_path(site)
+    storage_path = get_storage_state_path(site, component)
     if not storage_path:
         return [], None
 
@@ -312,8 +312,16 @@ async def run_ui_submission_multi(
                 all_results.extend((t, None) for t in batch)
 
     tracker.emit_run_done()
+    multi_test_cases = get_suite_multi_test_cases(suite_path) if suite_path else []
     log_path = (
-        _write_run_log(site, component, all_results, multi_batches=batches_raw)
+        _write_run_log(
+            site,
+            component,
+            all_results,
+            multi_batches=batches_raw,
+            multi_test_cases=multi_test_cases or None,
+            suite_path=suite_path,
+        )
         if all_results
         else None
     )

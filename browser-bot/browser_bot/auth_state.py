@@ -1,5 +1,8 @@
 """
 Auth state: full capture and load (cookies, localStorage, sessionStorage, headers).
+
+Primary store: ``sites/{site}/{component}/auth.json``
+Fallback (legacy): ``sites/{site}/auth.json``
 """
 
 import json
@@ -18,37 +21,128 @@ PUBLIC_AUTH_TEMPLATE: dict[str, Any] = {
 }
 
 
-def get_auth_path(domain: str) -> Path:
-    """Path to auth config dir for domain."""
+def _site_dir(site: str) -> Path:
     from browser_bot.sites import _domain_to_site_dir
 
-    return _domain_to_site_dir(domain)
+    return _domain_to_site_dir(site)
 
 
-def get_auth_config_path(domain: str) -> Path:
-    """Path to auth.json (preferred) or storage_state.json (legacy)."""
-    site_dir = get_auth_path(domain)
-    auth_json = site_dir / AUTH_FILE
-    storage_json = site_dir / STORAGE_STATE_FILE
-    return auth_json if auth_json.exists() else storage_json
+def _component_dir(site: str, component: str) -> Path:
+    return _site_dir(site) / component
 
 
-def auth_config_exists(domain: str) -> bool:
-    """True if auth config exists for domain."""
-    site_dir = get_auth_path(domain)
-    return (site_dir / AUTH_FILE).exists() or (site_dir / STORAGE_STATE_FILE).exists()
+def get_auth_path(site: str, component: str | None = None) -> Path:
+    """Directory that holds auth for a site or component."""
+    if component:
+        return _component_dir(site, component)
+    return _site_dir(site)
 
 
-def is_auth_configured(domain: str) -> bool:
-    """True when auth is ready for browser runs (session capture or explicit public/no-login)."""
-    config = load_auth_config(domain)
+def _auth_file_candidates(site: str, component: str | None) -> list[Path]:
+    candidates: list[Path] = []
+    if component:
+        comp_dir = _component_dir(site, component)
+        candidates.extend([comp_dir / AUTH_FILE, comp_dir / STORAGE_STATE_FILE])
+    site_dir = _site_dir(site)
+    candidates.extend([site_dir / AUTH_FILE, site_dir / STORAGE_STATE_FILE])
+    return candidates
+
+
+def resolve_auth_read_path(site: str, component: str | None = None) -> Path | None:
+    """Return existing auth file path (component first, then site fallback)."""
+    for path in _auth_file_candidates(site, component):
+        if path.is_file():
+            return path
+    return None
+
+
+def resolve_auth_scope(site: str, component: str | None = None) -> str:
+    """Return ``component``, ``site``, or ``none`` for the resolved auth file."""
+    path = resolve_auth_read_path(site, component)
+    if not path:
+        return "none"
+    if component and path.parent == _component_dir(site, component):
+        return "component"
+    return "site"
+
+
+def get_auth_write_path(site: str, component: str | None = None) -> Path:
+    """Path to write auth.json (component dir when component is set)."""
+    if component:
+        from browser_bot.sites import ensure_component_dir
+
+        ensure_component_dir(site, component)
+        return _component_dir(site, component) / AUTH_FILE
+    from browser_bot.sites import ensure_site_dir
+
+    ensure_site_dir(site)
+    return _site_dir(site) / AUTH_FILE
+
+
+def get_auth_config_path(site: str, component: str | None = None) -> Path:
+    """Preferred auth path for reads; falls back to site-level legacy path."""
+    resolved = resolve_auth_read_path(site, component)
+    if resolved:
+        return resolved
+    if component:
+        return _component_dir(site, component) / AUTH_FILE
+    return _site_dir(site) / AUTH_FILE
+
+
+def auth_config_exists(site: str, component: str | None = None) -> bool:
+    """True if auth config exists for component (with site fallback) or site only."""
+    return resolve_auth_read_path(site, component) is not None
+
+
+def load_auth_config(site: str, component: str | None = None) -> dict[str, Any] | None:
+    """Load auth config. Returns dict or None if not found."""
+    path = resolve_auth_read_path(site, component)
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return _normalize_auth_config(data)
+
+
+def _normalize_auth_config(data: dict) -> dict:
+    """Normalize legacy storage_state or full auth.json to unified format."""
+    for origin in data.get("origins", []):
+        if "sessionStorage" not in origin:
+            origin["sessionStorage"] = []
+    if "headers" not in data:
+        data["headers"] = {}
+    if "query_params" not in data:
+        data["query_params"] = {}
+    return data
+
+
+def save_auth_config(site: str, config: dict[str, Any], component: str | None = None) -> Path:
+    """Save auth config to component or site auth.json."""
+    path = get_auth_write_path(site, component)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    return path
+
+
+def clear_auth_config(site: str, component: str | None = None) -> Path:
+    """Reset auth so the user can choose login vs public access again."""
+    path = get_auth_write_path(site, component)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}", encoding="utf-8")
+    return path
+
+
+def is_auth_configured(site: str, component: str | None = None) -> bool:
+    """True when auth is ready for browser/API runs."""
+    config = load_auth_config(site, component)
     if not config:
         return False
     mode = config.get("auth_mode")
     if mode == "none":
         return True
     if mode == "api_key":
-        return bool(config.get("headers"))
+        return bool(config.get("headers") or config.get("query_params"))
     if config.get("cookies"):
         return True
     return any(
@@ -57,20 +151,20 @@ def is_auth_configured(domain: str) -> bool:
     )
 
 
-def auth_mode_for_domain(domain: str) -> str | None:
+def auth_mode_for_domain(site: str, component: str | None = None) -> str | None:
     """Return ``none``, ``api_key``, ``session``, or None when auth is not configured."""
-    if not is_auth_configured(domain):
+    if not is_auth_configured(site, component):
         return None
-    config = load_auth_config(domain) or {}
+    config = load_auth_config(site, component) or {}
     mode = config.get("auth_mode")
     if mode in ("none", "api_key"):
         return mode
     return "session"
 
 
-def save_public_auth(domain: str) -> Path:
+def save_public_auth(site: str, component: str | None = None) -> Path:
     """Save a no-login auth stub for public targets."""
-    return save_auth_config(domain, dict(PUBLIC_AUTH_TEMPLATE))
+    return save_auth_config(site, dict(PUBLIC_AUTH_TEMPLATE), component=component)
 
 
 def _api_key_header_value(
@@ -93,9 +187,10 @@ def _api_key_header_value(
 
 
 def save_api_key_auth(
-    domain: str,
+    site: str,
     api_key: str,
     *,
+    component: str | None = None,
     header_name: str = "Authorization",
     scheme: str = "Bearer",
     use_bearer: bool | None = None,
@@ -125,63 +220,66 @@ def save_api_key_auth(
         "query_params": query_params,
         "auth_mode": "api_key",
     }
-    return save_auth_config(domain, config)
+    return save_auth_config(site, config, component=component)
 
 
-def has_target_api_key(domain: str) -> bool:
-    """True when auth.json stores a target API key (auth_mode api_key with headers or query)."""
-    config = load_auth_config(domain)
+def has_target_api_key(site: str, component: str | None = None) -> bool:
+    """True when auth.json stores a target API key."""
+    config = load_auth_config(site, component)
     if not config or config.get("auth_mode") != "api_key":
         return False
     return bool(config.get("headers") or config.get("query_params"))
 
 
-def load_auth_config(domain: str) -> dict[str, Any] | None:
-    """Load auth config. Returns dict or None if not found."""
-    path = get_auth_config_path(domain)
-    if not path.exists():
-        return None
-    with open(path) as f:
-        data = json.load(f)
-    return _normalize_auth_config(data)
+def auth_status_payload(site: str, component: str | None = None) -> dict[str, Any]:
+    """Non-secret auth status for API responses."""
+    if not auth_config_exists(site, component):
+        return {
+            "configured": False,
+            "mode": None,
+            "scope": "none",
+            "has_api_key": False,
+            "auth_header": "",
+            "auth_query_param": "",
+            "use_bearer": False,
+        }
+    cfg = load_auth_config(site, component) or {}
+    headers = cfg.get("headers") or {}
+    query_params = cfg.get("query_params") or {}
+    auth_header = next(iter(headers.keys()), "") if headers else ""
+    auth_query_param = next(iter(query_params.keys()), "") if query_params else ""
+    use_bearer = False
+    if auth_header.lower() == "authorization":
+        val = str(headers.get(auth_header) or "")
+        use_bearer = bool(val) and val.lower().startswith("bearer ")
+    return {
+        "configured": is_auth_configured(site, component),
+        "mode": auth_mode_for_domain(site, component),
+        "scope": resolve_auth_scope(site, component),
+        "has_api_key": has_target_api_key(site, component),
+        "auth_header": auth_header,
+        "auth_query_param": auth_query_param,
+        "use_bearer": use_bearer,
+    }
 
 
-def _normalize_auth_config(data: dict) -> dict:
-    """Normalize legacy storage_state or full auth.json to unified format."""
-    # Ensure each origin has sessionStorage
-    for origin in data.get("origins", []):
-        if "sessionStorage" not in origin:
-            origin["sessionStorage"] = []
-    if "headers" not in data:
-        data["headers"] = {}
-    if "query_params" not in data:
-        data["query_params"] = {}
-    return data
-
-
-def save_auth_config(domain: str, config: dict[str, Any]) -> Path:
-    """Save auth config to auth.json."""
-    from browser_bot.sites import ensure_site_dir
-
-    site_dir = ensure_site_dir(domain)
-    path = site_dir / AUTH_FILE
-    with open(path, "w") as f:
-        json.dump(config, f, indent=2)
-    return path
-
-
-def clean_auth_storage(domain: str, max_value_len: int | None = None) -> tuple[bool, str]:
+def clean_auth_storage(
+    site: str,
+    component: str | None = None,
+    max_value_len: int | None = None,
+) -> tuple[bool, str]:
     """
     Strip localStorage/sessionStorage items with value length > max_value_len.
     Re-saves auth.json. Returns (success, message).
     """
     from browser_bot.config import LOCALSTORAGE_MAX_VALUE_LEN
-    from browser_bot.sites import ensure_site_dir
 
     max_len = max_value_len if max_value_len is not None else LOCALSTORAGE_MAX_VALUE_LEN
-    config = load_auth_config(domain)
+    scope = resolve_auth_scope(site, component)
+    config = load_auth_config(site, component)
     if not config:
-        return False, f"No auth.json for {domain}"
+        label = f"{site}/{component}" if component else site
+        return False, f"No auth.json for {label}"
 
     def _filter(items: list) -> list:
         return [i for i in items if len(str(i.get("value", ""))) <= max_len]
@@ -198,5 +296,6 @@ def clean_auth_storage(domain: str, max_value_len: int | None = None) -> tuple[b
 
     if removed == 0:
         return True, f"No items over {max_len} chars to remove."
-    save_auth_config(domain, config)
+    write_component = component if scope == "component" else None
+    save_auth_config(site, config, component=write_component)
     return True, f"Removed {removed} items (value > {max_len} chars)."

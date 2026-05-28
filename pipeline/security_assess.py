@@ -233,17 +233,32 @@ def _apply_judge_grounding(result: dict, entry: dict) -> None:
             )
 
 
-def _build_test_record(entry: dict, playbook_id: str = "owasp_llm") -> dict:
+def _entry_metadata(entry: dict) -> dict[str, Any]:
+    """Copy log fields that should appear in pipeline_report rows."""
+    meta: dict[str, Any] = {}
+    for key in ("strategy", "prior_turns", "turns", "vector_type", "artifact_path"):
+        if entry.get(key) is not None:
+            meta[key] = entry[key]
+    return meta
+
+
+def _build_test_record(
+    entry: dict,
+    playbook_id: str = "owasp_llm",
+    *,
+    default_strategy: str = "security",
+) -> dict:
     response_text = entry.get("response") or ""
     if len(response_text) > MAX_RESPONSE_CHARS:
         response_text = response_text[:MAX_RESPONSE_CHARS] + "\n[response truncated]"
     category = entry.get("category", entry.get("mandate", ""))
     vector_type = entry.get("vector_type", "text_direct")
+    strategy = (entry.get("strategy") or default_strategy or "security").strip() or "security"
     record = {
         "playbook_id": playbook_id,
         "category": category,
         "test_name": entry.get("id", ""),
-        "strategy": "security",
+        "strategy": strategy,
         "description": entry.get("description", ""),
         "prompt": _format_prompt_for_eval(entry),
         "vector_type": vector_type,
@@ -313,6 +328,12 @@ def _result_from_state(entry: dict, entry_id: str, category: str, result_state: 
         result["vector_type"] = entry["vector_type"]
     if entry.get("artifact_path"):
         result["artifact_path"] = entry["artifact_path"]
+    if entry.get("strategy"):
+        result["strategy"] = entry["strategy"]
+    if entry.get("prior_turns"):
+        result["prior_turns"] = entry["prior_turns"]
+    if entry.get("turns"):
+        result["turns"] = entry["turns"]
     return result
 
 
@@ -334,6 +355,7 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
     results = log_data.get("results", [])
     adversarial = _filter_assessment_entries(results)
     playbook_id = log_data.get("playbook_id", "owasp_llm")
+    default_strategy = (log_data.get("strategy") or "").strip() or "security"
     if not playbook_id and log_data.get("playbook"):
         playbook_id = str(log_data.get("playbook", "")).lower().replace(" ", "_")[:32]
     if not adversarial:
@@ -355,7 +377,11 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
     def _assess_entry(index: int, entry: dict) -> tuple[int, list[str], dict]:
         entry_id = entry.get("id", f"entry-{index}")
         category = entry.get("category", entry.get("mandate", ""))
-        record = _build_test_record(entry, playbook_id=playbook_id)
+        record = _build_test_record(
+            entry,
+            playbook_id=playbook_id,
+            default_strategy=default_strategy,
+        )
         evaluation_input = build_evaluation_input(**_evaluation_kwargs(record))
         cached = _load_cached_result(evaluation_input, expert_ids=expert_ids)
         lines: list[str] = []
@@ -400,6 +426,7 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
                 "risk_level": "low",
                 "judge_reasoning": "Model refused the attack (fast-path).",
                 "experts_summary": [],
+                **_entry_metadata(entry),
             }
             completed += 1
             _emit_progress(t0, completed, total)
@@ -415,6 +442,7 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
                 "risk_level": "indeterminate",
                 "judge_reasoning": "Non-substantive output; cannot assess exploit.",
                 "experts_summary": [],
+                **_entry_metadata(entry),
             }
             completed += 1
             _emit_progress(t0, completed, total)
@@ -435,6 +463,7 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
                     "risk_level": "indeterminate",
                     "judge_reasoning": f"Assessment error: {exc}",
                     "experts_summary": [],
+                    **_entry_metadata(entry),
                 }
             for line in lines:
                 print(line, flush=True)
@@ -463,6 +492,7 @@ def run_security_assessment(attack_log_path: Path) -> list[dict]:
                         "risk_level": "indeterminate",
                         "judge_reasoning": f"Assessment error: {exc}",
                         "experts_summary": [],
+                        **_entry_metadata(entry),
                     }
                     lines = []
                 for line in lines:

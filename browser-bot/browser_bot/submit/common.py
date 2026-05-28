@@ -675,6 +675,8 @@ def _write_run_log(
     *,
     multi_batches: list[list[str]] | None = None,
     test_cases: list[dict] | None = None,
+    multi_test_cases: list[dict] | None = None,
+    suite_path: Path | str | None = None,
 ) -> Path | None:
     """Write run log to sites/{site}/{component}/logs/{timestamp}/run_log.json.
 
@@ -686,12 +688,17 @@ def _write_run_log(
     one batch per multi-shot conversation. Otherwise flat entries (single-shot).
     """
     try:
+        from browser_bot.config import infer_strategy_from_suite_path
+
         ensure_component_dir(site, component)
         logs_dir = get_component_path(site, component) / "logs"
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_dir = logs_dir / timestamp
         run_dir.mkdir(parents=True, exist_ok=True)
         log_path = run_dir / "run_log.json"
+
+        strategy = infer_strategy_from_suite_path(suite_path)
+        source_file = str(suite_path) if suite_path else ""
 
         entries = []
         for i, (inp, resp) in enumerate(results):
@@ -707,7 +714,7 @@ def _write_run_log(
                 try:
                     from browser_bot.artifacts import resolve_test_artifact
 
-                    ap, _, upload_ok = resolve_test_artifact(tc)
+                    ap, _, upload_ok = resolve_test_artifact(tc, suite_path=suite_path)
                     if ap:
                         row["artifact_path"] = str(ap)
                     row["upload_ok"] = upload_ok
@@ -736,14 +743,23 @@ def _write_run_log(
                     }
                     for turn_index, (inp, resp) in enumerate(chunk)
                 ]
-                batches_out.append(
-                    {
-                        "batch_index": batch_index,
-                        "turn_count": n,
-                        "turns": turns,
-                    }
-                )
-            log_data = {
+                batch_row: dict[str, Any] = {
+                    "batch_index": batch_index,
+                    "turn_count": n,
+                    "turns": turns,
+                }
+                if multi_test_cases and batch_index < len(multi_test_cases):
+                    tc = multi_test_cases[batch_index]
+                    if tc.get("id"):
+                        batch_row["id"] = tc["id"]
+                    if tc.get("description"):
+                        batch_row["description"] = tc["description"]
+                    if tc.get("vector_type"):
+                        batch_row["vector_type"] = tc["vector_type"]
+                    if tc.get("category"):
+                        batch_row["category"] = tc["category"]
+                batches_out.append(batch_row)
+            log_data: dict[str, Any] = {
                 "site": site,
                 "component": component,
                 "timestamp": timestamp,
@@ -758,6 +774,11 @@ def _write_run_log(
                 "mode": "single",
                 "entries": entries,
             }
+
+        if strategy:
+            log_data["strategy"] = strategy
+        if source_file:
+            log_data["source_file"] = source_file
 
         with open(log_path, "w") as f:
             json.dump(log_data, f, indent=2)

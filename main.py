@@ -193,7 +193,7 @@ def _run_security_assess(args) -> None:
     for r in risk_results:
         entry_id = r.get("id", "")
         cl = compliance_by_id.get(entry_id, {})
-        for field in ("description", "expected_behavior", "status", "ok", "error"):
+        for field in ("description", "expected_behavior", "status", "ok", "error", "strategy", "prior_turns", "turns"):
             if field not in r:
                 r[field] = cl.get(field)
 
@@ -230,6 +230,8 @@ def _run_security_assess(args) -> None:
         "adversarial_results": risk_results,
         "category_rollup": category_rollup,
     }
+    if log_data.get("strategy"):
+        report["strategy"] = log_data["strategy"]
     report_path = log_dir / "pipeline_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[+] Pipeline report: {report_path}")
@@ -331,7 +333,7 @@ def _run_tests(args) -> None:
         }
         for r in risk_results:
             cl = compliance_by_id.get(r.get("id", ""), {})
-            for field in ("description", "expected_behavior", "status", "ok", "error"):
+            for field in ("description", "expected_behavior", "status", "ok", "error", "strategy", "prior_turns", "turns"):
                 if field not in r:
                     r[field] = cl.get(field)
 
@@ -366,6 +368,8 @@ def _run_tests(args) -> None:
             "adversarial_results": risk_results,
             "category_rollup": category_rollup,
         }
+        if log_data.get("strategy"):
+            report["strategy"] = log_data["strategy"]
         report_path = attack_log.parent / "pipeline_report.json"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"[+] Pipeline report: {report_path}")

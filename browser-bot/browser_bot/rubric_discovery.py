@@ -621,7 +621,7 @@ async def run_company_discovery(site: str, overwrite: bool = False) -> bool:
             return False
 
     profile_path = get_login_profile_path(site)
-    storage_path = get_storage_state_path(site)
+    storage_path = get_storage_state_path(site, component)
     has_profile = LOGIN_USE_PERSISTENT_CONTEXT and profile_path.exists()
 
     print("\n" + "─" * 60)

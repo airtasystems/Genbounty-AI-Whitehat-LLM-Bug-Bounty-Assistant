@@ -81,6 +81,53 @@ def resolve_test_artifact(
         return None, vector_type, False
 
 
+def infer_strategy_from_suite_path(suite_path: Path | str | None) -> str:
+    """Infer generation strategy slug from suite path (e.g. tests/multi-shot/foo.json -> multi_shot)."""
+    if not suite_path:
+        return ""
+    parts = Path(suite_path).parts
+    if "tests" not in parts:
+        return ""
+    idx = parts.index("tests")
+    if idx + 1 >= len(parts):
+        return ""
+    return parts[idx + 1].replace("-", "_")
+
+
+def load_suite_multi_test_cases(suite_path: Path | str) -> list[dict[str, Any]]:
+    """Load multi-turn test case dicts (prompts arrays) from a suite JSON file."""
+    path = Path(suite_path)
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    out: list[dict[str, Any]] = []
+    cats = raw.get("categories") or raw.get("mandates") or []
+    if not isinstance(cats, list):
+        return out
+    for cat in cats:
+        if not isinstance(cat, dict):
+            continue
+        cat_name = cat.get("name", cat.get("mandate", ""))
+        for p in cat.get("prompts") or []:
+            if not isinstance(p, dict):
+                continue
+            prompts = p.get("prompts")
+            if not isinstance(prompts, list) or not prompts:
+                continue
+            turn_prompts = [s.strip() for s in prompts if isinstance(s, str) and s.strip()]
+            if not turn_prompts:
+                continue
+            out.append({
+                "id": p.get("id", ""),
+                "category": cat_name,
+                "description": p.get("description", ""),
+                "prompts": turn_prompts,
+                "vector_type": p.get("vector_type", "text_direct"),
+                "payload": p.get("payload"),
+                "context_mode": p.get("context_mode", "upload"),
+                "control_type": p.get("control_type"),
+            })
+    return out
+
+
 def load_suite_test_cases(suite_path: Path | str) -> list[dict[str, Any]]:
     """Load flat test case dicts from a suite JSON file."""
     path = Path(suite_path)
