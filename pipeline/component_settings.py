@@ -28,6 +28,21 @@ CACHE_SETTING_KEYS = frozenset({"gemini_use_cache"})
 
 ALL_SETTING_KEYS = EDITABLE_BROWSER_VARS | CACHE_SETTING_KEYS
 
+# Written into new sites/<site>/config.yaml and sites/<site>/<component>/config.yaml.
+INITIAL_CONFIG_SETTINGS: dict[str, Any] = {
+    "FETCH_METHOD": "pool",
+    "HEADLESS": True,
+    "POOL_SIZE": 6,
+    "API_CONCURRENCY": 8,
+    "EVASION_REQUEST_DELAY_S": 0.5,
+}
+
+
+def initial_config_settings() -> dict[str, Any]:
+    """Default ``settings:`` block for newly created site/component config.yaml files."""
+    return dict(INITIAL_CONFIG_SETTINGS)
+
+
 SETTING_GROUPS: list[dict[str, Any]] = [
     {
         "id": "cache",

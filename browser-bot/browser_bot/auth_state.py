@@ -13,6 +13,7 @@ PUBLIC_AUTH_TEMPLATE: dict[str, Any] = {
     "cookies": [],
     "origins": [],
     "headers": {},
+    "query_params": {},
     "auth_mode": "none",
 }
 
@@ -43,8 +44,11 @@ def is_auth_configured(domain: str) -> bool:
     config = load_auth_config(domain)
     if not config:
         return False
-    if config.get("auth_mode") == "none":
+    mode = config.get("auth_mode")
+    if mode == "none":
         return True
+    if mode == "api_key":
+        return bool(config.get("headers"))
     if config.get("cookies"):
         return True
     return any(
@@ -54,18 +58,82 @@ def is_auth_configured(domain: str) -> bool:
 
 
 def auth_mode_for_domain(domain: str) -> str | None:
-    """Return ``none``, ``session``, or None when auth is not configured."""
+    """Return ``none``, ``api_key``, ``session``, or None when auth is not configured."""
     if not is_auth_configured(domain):
         return None
     config = load_auth_config(domain) or {}
-    if config.get("auth_mode") == "none":
-        return "none"
+    mode = config.get("auth_mode")
+    if mode in ("none", "api_key"):
+        return mode
     return "session"
 
 
 def save_public_auth(domain: str) -> Path:
     """Save a no-login auth stub for public targets."""
     return save_auth_config(domain, dict(PUBLIC_AUTH_TEMPLATE))
+
+
+def _api_key_header_value(
+    header_name: str,
+    key: str,
+    *,
+    use_bearer: bool | None = None,
+) -> str:
+    header = (header_name or "Authorization").strip() or "Authorization"
+    if header.lower() != "authorization":
+        return key
+    lower = key.lower()
+    if lower.startswith("bearer ") or lower.startswith("basic "):
+        return key
+    if use_bearer is False:
+        return key
+    if use_bearer is True or use_bearer is None:
+        return f"Bearer {key}"
+    return key
+
+
+def save_api_key_auth(
+    domain: str,
+    api_key: str,
+    *,
+    header_name: str = "Authorization",
+    scheme: str = "Bearer",
+    use_bearer: bool | None = None,
+    query_param_name: str = "",
+) -> Path:
+    """Save target API key in auth headers and/or query_params."""
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("API key is required")
+    header = (header_name or "").strip()
+    qparam = (query_param_name or "").strip()
+    headers: dict[str, str] = {}
+    query_params: dict[str, str] = {}
+    if header:
+        bearer = use_bearer
+        if bearer is None and header.lower() == "authorization":
+            bearer = True
+        headers[header] = _api_key_header_value(header, key, use_bearer=bearer)
+    if qparam:
+        query_params[qparam] = key
+    if not headers and not query_params:
+        headers["Authorization"] = _api_key_header_value("Authorization", key, use_bearer=True)
+    config = {
+        "cookies": [],
+        "origins": [],
+        "headers": headers,
+        "query_params": query_params,
+        "auth_mode": "api_key",
+    }
+    return save_auth_config(domain, config)
+
+
+def has_target_api_key(domain: str) -> bool:
+    """True when auth.json stores a target API key (auth_mode api_key with headers or query)."""
+    config = load_auth_config(domain)
+    if not config or config.get("auth_mode") != "api_key":
+        return False
+    return bool(config.get("headers") or config.get("query_params"))
 
 
 def load_auth_config(domain: str) -> dict[str, Any] | None:
@@ -86,6 +154,8 @@ def _normalize_auth_config(data: dict) -> dict:
             origin["sessionStorage"] = []
     if "headers" not in data:
         data["headers"] = {}
+    if "query_params" not in data:
+        data["query_params"] = {}
     return data
 
 

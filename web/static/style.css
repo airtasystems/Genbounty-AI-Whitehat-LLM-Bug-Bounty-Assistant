@@ -731,7 +731,8 @@ select { cursor: pointer; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.checkbox-row-tight { gap: 4px; }
+.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .checkbox-row label { font-size: 13px; color: var(--text-dim); }
 
 /* Output console */
@@ -1401,7 +1402,67 @@ select { cursor: pointer; }
   flex-direction: column;
   gap: 12px;
 }
+.tm-import-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tm-import-title-row strong { margin-bottom: 0; }
 .tm-import strong { display: block; font-size: 13px; color: var(--text); font-weight: 600; margin-bottom: 4px; }
+.btn-icon-help {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.btn-icon-help:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
+.modal-import-help {
+  width: min(920px, 96vw);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.import-format-block { margin-bottom: 20px; }
+.import-format-block:last-of-type { margin-bottom: 8px; }
+.import-format-heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 10px;
+}
+.import-format-pre {
+  display: block;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+}
+.import-format-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.import-format-note code { font-family: var(--mono); color: var(--accent-glow); }
 .tm-import p { color: var(--text-dim); font-size: 13px; line-height: 1.5; margin: 0; }
 .tm-import code { font-family: var(--mono); color: var(--accent-glow); }
 .tm-import-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }

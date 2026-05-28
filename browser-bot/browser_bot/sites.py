@@ -177,10 +177,13 @@ def ensure_component_dir(domain: str, component: str) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     config_path = get_component_config_path(domain, component)
     if not config_path.exists():
+        from pipeline.component_settings import initial_config_settings
+
         default_config = {
             "urls": [],
             "posts": [],
             "login_url": _default_login_url(domain),
+            "settings": initial_config_settings(),
         }
         write_component_config_with_header(config_path, default_config)
     return path
@@ -303,7 +306,7 @@ def _normalize_api_submission(sub: dict, config: dict) -> dict | None:
         api_body = sub.get("api_body_template")
     if api_body is None:
         api_body = {"prompt": "{{prompt}}"}
-    return {
+    out = {
         "transport": "api",
         "api_url": str(api_url).strip(),
         "api_method": (sub.get("api_method") or "POST").upper(),
@@ -313,6 +316,10 @@ def _normalize_api_submission(sub: dict, config: dict) -> dict | None:
         "mode": sub.get("mode"),
         "batch_size": sub.get("batch_size"),
     }
+    api_model = sub.get("api_model")
+    if api_model:
+        out["api_model"] = str(api_model).strip()
+    return out
 
 
 def describe_submission_config_issue(config: dict) -> str:

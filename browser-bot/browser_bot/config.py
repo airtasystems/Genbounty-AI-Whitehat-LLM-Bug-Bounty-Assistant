@@ -313,7 +313,7 @@ def _apply_ui_prompt_transform(text: str) -> str:
 FETCH_METHOD = 'pool'
 
 # --- Pool (Tier 1: Full speed) ---
-POOL_SIZE = 2
+POOL_SIZE = 6
 
 # --- Pool + cluster browser (shared by FETCH_METHOD pool and cluster) ---
 # When True, enable all flags below (human Chrome, styles, stealth, context opts).

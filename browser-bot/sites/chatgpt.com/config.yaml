@@ -1,0 +1,34 @@
+# =============================================================================
+# Site config - browser-bot/sites/<site>/config.yaml
+# =============================================================================
+#
+# Shared settings for every component on this site. Component config.yaml
+# overrides values here for submission selectors and per-component settings.
+#
+# Precedence for settings: component → this file → config.py / .env →
+# config.defaults.yaml. See repo-root config.defaults.yaml for all settings keys.
+#
+# Created automatically on first Discovery run if missing.
+
+# --- Auth --------------------------------------------------------------------
+# Page opened for "Add Login" / manual sign-in. Usually the site root or /login.
+# http:// for localhost; https:// for production hosts.
+# Shared by all components on this site unless a component sets its own login_url.
+login_url: "https://chatgpt.com"
+
+# --- Token refresh (optional) ------------------------------------------------
+# Used by browser-bot to renew auth tokens. Often set once at site level.
+# refresh_url: https://example.com/api/auth/refresh
+# refresh_mode: both
+# refresh_cookies:
+#   - session_id
+
+# --- Settings overrides (optional) ---------------------------------------------
+# Apply to all components on this site unless overridden in component config.yaml.
+# Full list and allowed values: see config.defaults.yaml at repo root.
+settings:
+  FETCH_METHOD: pool
+  HEADLESS: true
+  POOL_SIZE: 6
+  API_CONCURRENCY: 8
+  EVASION_REQUEST_DELAY_S: 0.5

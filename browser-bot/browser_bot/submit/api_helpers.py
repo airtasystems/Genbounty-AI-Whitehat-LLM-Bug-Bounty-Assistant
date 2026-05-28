@@ -7,6 +7,8 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
 import urllib.error
 import urllib.request
 
@@ -31,20 +33,74 @@ def apply_prompt_template(obj: Any, prompt: str, *, extra: dict[str, str] | None
 
 
 def extract_json_path(data: Any, path: str) -> Any:
-    """Extract a dotted path from parsed JSON (e.g. ``response`` or ``data.text``)."""
+    """Extract a dotted path from parsed JSON (e.g. ``choices.0.message.content``)."""
     path = (path or "").strip()
     if not path:
         return data
     cur = data
     for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError, TypeError):
+                return None
+        elif isinstance(cur, dict) and part in cur:
             cur = cur[part]
         else:
             return None
     return cur
 
 
-def auth_headers_for_site(site: str | None) -> dict[str, str]:
+def _merge_url_query(url: str, extra: dict[str, str]) -> str:
+    if not extra:
+        return url
+    parsed = urlparse(url)
+    existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for k, v in extra.items():
+        if k and k not in existing:
+            existing[k] = v
+    return urlunparse(parsed._replace(query=urlencode(existing)))
+
+
+def _normalize_provider_auth(
+    headers: dict[str, str],
+    url: str,
+    query_params: dict[str, str],
+) -> dict[str, str]:
+    """Map auth to provider-specific headers (e.g. Gemini x-goog-api-key)."""
+    out = dict(headers)
+    host = (urlparse(url).netloc or "").lower()
+    if "generativelanguage.googleapis.com" not in host:
+        return out
+
+    key_val = None
+    auth = out.pop("Authorization", None) or out.pop("authorization", None)
+    if auth:
+        auth = auth.strip()
+        if auth.lower().startswith("bearer "):
+            key_val = auth[7:].strip()
+        elif auth.lower().startswith("aiza"):
+            key_val = auth
+        else:
+            key_val = auth
+    if not key_val and query_params.get("key"):
+        key_val = query_params["key"]
+    if key_val and "x-goog-api-key" not in {k.lower() for k in out}:
+        out["x-goog-api-key"] = key_val
+    return out
+
+
+def auth_query_params_for_site(site: str | None) -> dict[str, str]:
+    if not site:
+        return {}
+    from browser_bot.auth_state import load_auth_config
+
+    cfg = load_auth_config(site) or {}
+    raw = cfg.get("query_params") or {}
+    return {str(k): str(v) for k, v in raw.items()}
+
+
+def auth_headers_for_site(site: str | None, *, url: str = "") -> dict[str, str]:
     """Merge saved auth headers and cookies for API requests."""
     if not site:
         return {}
@@ -60,7 +116,20 @@ def auth_headers_for_site(site: str | None) -> dict[str, str]:
                 parts.append(f"{cookie['name']}={cookie.get('value', '')}")
         if parts:
             headers.setdefault("Cookie", "; ".join(parts))
-    return headers
+    query_params = {str(k): str(v) for k, v in (cfg.get("query_params") or {}).items()}
+    return _normalize_provider_auth(headers, url, query_params)
+
+
+def resolve_api_url(sub: dict[str, Any], *, site: str | None = None) -> str:
+    """Substitute {{model}} and merge auth query params into the request URL."""
+    url = str(sub.get("api_url") or "").strip()
+    model = str(sub.get("api_model") or "").strip()
+    if "{{model}}" in url and not model:
+        raise ValueError("api_model is required when api_url contains {{model}}")
+    if model:
+        url = url.replace("{{model}}", model)
+    extra = auth_query_params_for_site(site)
+    return _merge_url_query(url, extra)
 
 
 def _http_request(
@@ -161,12 +230,22 @@ def do_api_request(
             sub, prompt, site=site, timeout=timeout, test_case=test_case, suite_path=suite_path
         )
 
-    url = sub["api_url"]
+    try:
+        url = resolve_api_url(sub, site=site)
+    except ValueError as exc:
+        return 0, None, str(exc)
+
     method = (sub.get("api_method") or "POST").upper()
     headers = {"Accept": "application/json", **dict(sub.get("api_headers") or {})}
-    headers.update(auth_headers_for_site(site))
+    headers.update(auth_headers_for_site(site, url=url))
 
-    body_obj = apply_prompt_template(sub.get("api_body") or {"prompt": "{{prompt}}"}, prompt)
+    model = str(sub.get("api_model") or "").strip()
+    extras = {"model": model} if model else {}
+    body_obj = apply_prompt_template(
+        sub.get("api_body") or {"prompt": "{{prompt}}"},
+        prompt,
+        extra=extras,
+    )
     data: bytes | None = None
     if method in {"POST", "PUT", "PATCH"}:
         if "Content-Type" not in headers and "content-type" not in headers:

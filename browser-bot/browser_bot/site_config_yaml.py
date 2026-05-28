@@ -27,12 +27,14 @@ _KNOWN_SITE_KEYS = frozenset({
 
 def default_site_config(domain: str, *, login_url: str | None = None) -> dict[str, Any]:
     """Build a minimal default site config dict."""
+    from pipeline.component_settings import initial_config_settings
+
     if not login_url:
         if "localhost" in domain or domain.startswith("127."):
             login_url = f"http://{domain}"
         else:
             login_url = f"https://{domain}"
-    return {"login_url": login_url}
+    return {"login_url": login_url, "settings": initial_config_settings()}
 
 
 def _format_settings(settings: dict[str, Any]) -> list[str]:

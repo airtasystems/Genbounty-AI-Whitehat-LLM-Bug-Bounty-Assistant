@@ -26,7 +26,9 @@ if str(_root) not in sys.path:
 from browser_bot.auth_state import (
     auth_config_exists,
     auth_mode_for_domain,
+    has_target_api_key,
     is_auth_configured,
+    save_api_key_auth,
     save_public_auth,
 )
 from browser_bot.sites import ensure_site_dir, AUTH_FILE
@@ -119,13 +121,42 @@ async def api_delete_site(site: str):
     raise HTTPException(404, "Site not found")
 
 
+@app.get("/api/llm-api-presets")
+async def api_llm_api_presets():
+    from browser_bot.api_presets import get_llm_api_presets
+
+    return get_llm_api_presets()
+
+
 @app.get("/api/sites/{site}/auth-status")
 async def api_auth_status(site: str):
+    from browser_bot.auth_state import load_auth_config
+
     if not auth_config_exists(site):
-        return {"configured": False, "mode": None}
+        return {
+            "configured": False,
+            "mode": None,
+            "has_api_key": False,
+            "auth_header": "",
+            "auth_query_param": "",
+            "use_bearer": False,
+        }
+    cfg = load_auth_config(site) or {}
+    headers = cfg.get("headers") or {}
+    query_params = cfg.get("query_params") or {}
+    auth_header = next(iter(headers.keys()), "") if headers else ""
+    auth_query_param = next(iter(query_params.keys()), "") if query_params else ""
+    use_bearer = False
+    if auth_header.lower() == "authorization":
+        val = str(headers.get(auth_header) or "")
+        use_bearer = bool(val) and val.lower().startswith("bearer ")
     return {
         "configured": is_auth_configured(site),
         "mode": auth_mode_for_domain(site),
+        "has_api_key": has_target_api_key(site),
+        "auth_header": auth_header,
+        "auth_query_param": auth_query_param,
+        "use_bearer": use_bearer,
     }
 
 
@@ -134,6 +165,31 @@ async def api_init_public_auth(site: str):
     """Initialize auth.json for targets that do not require login."""
     path = save_public_auth(site)
     return {"ok": True, "mode": "none", "path": str(path)}
+
+
+class TargetApiKeyBody(BaseModel):
+    api_key: str = ""
+    header_name: str = "Authorization"
+    scheme: str = "Bearer"
+    use_bearer: bool | None = None
+    query_param_name: str = ""
+
+
+@app.post("/api/sites/{site}/auth/api-key")
+async def api_save_target_api_key(site: str, body: TargetApiKeyBody):
+    """Store target API key in auth.json headers (no browser login session)."""
+    try:
+        path = save_api_key_auth(
+            site,
+            body.api_key,
+            header_name=body.header_name,
+            scheme=body.scheme,
+            use_bearer=body.use_bearer,
+            query_param_name=body.query_param_name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "mode": "api_key", "path": str(path), "has_api_key": True}
 
 
 @app.delete("/api/sites/{site}/auth")
@@ -429,6 +485,42 @@ async def api_all_playbooks(site: str, component: str):
     return [{"slug": s, "label": _pretty(s)} for s in sorted(stems)]
 
 
+@app.get("/api/sites/{site}/{component}/test-files")
+async def api_test_files(site: str, component: str):
+    """Test files (playbook stems) with strategies that contain each file, newest first."""
+    tests = _bb_dir / "sites" / site / component / "tests"
+    if not tests.is_dir():
+        return []
+    by_stem: dict[str, dict] = {}
+    for strat_dir in tests.iterdir():
+        if not strat_dir.is_dir():
+            continue
+        strat = strat_dir.name
+        for f in strat_dir.glob("*.json"):
+            stem = f.stem
+            if stem not in by_stem:
+                by_stem[stem] = {
+                    "slug": stem,
+                    "label": _pretty(stem),
+                    "strategies": [],
+                    "mtime": 0.0,
+                }
+            entry = by_stem[stem]
+            if strat not in entry["strategies"]:
+                entry["strategies"].append(
+                    {"slug": strat, "label": _pretty(strat)}
+                )
+            mtime = f.stat().st_mtime
+            if mtime > entry["mtime"]:
+                entry["mtime"] = mtime
+    items = list(by_stem.values())
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    for item in items:
+        item["strategies"].sort(key=lambda s: s["slug"], reverse=True)
+        del item["mtime"]
+    return items
+
+
 @app.get("/api/sites/{site}/{component}/strategies/{strategy}/playbooks")
 async def api_strategy_playbooks(site: str, component: str, strategy: str):
     d = _bb_dir / "sites" / site / component / "tests" / strategy
@@ -469,9 +561,17 @@ def _normalize_prompt(raw, idx: int) -> dict:
         description = "Imported zero-shot prompt"
         prompt_id = f"imported-zs-{idx:03d}"
     elif isinstance(raw, dict):
-        prompt = str(raw.get("prompt") or raw.get("text") or raw.get("content") or "").strip()
         description = str(raw.get("description") or "Imported zero-shot prompt").strip()
         prompt_id = str(raw.get("id") or f"imported-zs-{idx:03d}").strip()
+        turns_raw = raw.get("prompts")
+        if isinstance(turns_raw, list) and turns_raw:
+            turns = [str(t).strip() for t in turns_raw if str(t).strip()]
+            if not turns:
+                raise HTTPException(400, f"Prompt {idx} has an empty prompts array")
+            if not prompt_id:
+                prompt_id = f"imported-zs-{idx:03d}"
+            return {"id": prompt_id, "description": description, "prompts": turns}
+        prompt = str(raw.get("prompt") or raw.get("text") or raw.get("content") or "").strip()
     else:
         raise HTTPException(400, f"Prompt {idx} must be a string or object")
     if not prompt:

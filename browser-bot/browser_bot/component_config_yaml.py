@@ -28,12 +28,12 @@ SETTINGS_OVERRIDES_EXAMPLE = """
 #
 # settings:
 #   gemini_use_cache: false          # true | false
-#   FETCH_METHOD: human              # auto | pool | cluster | human
+#   FETCH_METHOD: pool               # auto | pool | cluster | human
 #   HEADLESS: true                   # true | false
 #   HUMAN_COUNTRY: UK                # US | UK | DE | FR | JP | CA | AU | NL | ES | IT
 #   CHROME_CHANNEL: chromium         # chromium | chrome | chrome-beta | msedge
 #   BLOCKED_TYPES: [image, font]     # image | font | media | stylesheet
-#   POOL_SIZE: 8
+#   POOL_SIZE: 6
 #   API_CONCURRENCY: 8
 #   EVASION_REQUEST_DELAY_S: 0.5
 """
@@ -99,13 +99,19 @@ def _format_api_submission(submission: dict[str, Any]) -> list[str]:
         "  # Transport: ui (browser automation) | api (HTTP endpoint)",
         "  transport: api",
         "",
-        "  # Full URL of the chat/completion endpoint.",
+        "  # Full URL of the chat/completion endpoint. Use {{model}} in URL/body when needed.",
         f"  api_url: {_yaml_scalar(submission.get('api_url', ''))}",
         "",
+    ]
+    api_model = submission.get("api_model")
+    if api_model:
+        lines.append(f"  api_model: {_yaml_scalar(api_model)}")
+        lines.append("")
+    lines.extend([
         "  # HTTP method. Options: POST | GET | PUT | PATCH",
         f"  api_method: {(submission.get('api_method') or 'POST')}",
         "",
-    ]
+    ])
     headers = submission.get("api_headers") or {}
     if headers:
         lines.append("  # Optional request headers (merged with saved auth headers).")
